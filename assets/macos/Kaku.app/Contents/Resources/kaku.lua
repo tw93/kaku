@@ -527,6 +527,35 @@ config.keys = {
     action = wezterm.action.SendString('\n'),
   },
 
+  -- Cmd+Shift+Enter: Toggle Pane Zoom (Maximize active pane)
+  {
+    key = 'Enter',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.TogglePaneZoomState,
+  },
+
+  -- Cmd+Ctrl+Arrows: Resize panes
+  {
+    key = 'LeftArrow',
+    mods = 'CMD|CTRL',
+    action = wezterm.action.AdjustPaneSize { 'Left', 5 },
+  },
+  {
+    key = 'RightArrow',
+    mods = 'CMD|CTRL',
+    action = wezterm.action.AdjustPaneSize { 'Right', 5 },
+  },
+  {
+    key = 'UpArrow',
+    mods = 'CMD|CTRL',
+    action = wezterm.action.AdjustPaneSize { 'Up', 5 },
+  },
+  {
+    key = 'DownArrow',
+    mods = 'CMD|CTRL',
+    action = wezterm.action.AdjustPaneSize { 'Down', 5 },
+  },
+
 
 }
 
@@ -550,6 +579,13 @@ config.front_end = 'OpenGL'
 config.webgpu_power_preference = 'HighPerformance'
 config.animation_fps = 60
 config.max_fps = 60
+
+-- ===== Visuals & Splits =====
+-- Dim inactive panes to focus on the active one
+config.inactive_pane_hsb = {
+  saturation = 0.9,
+  brightness = 0.65,
+}
 
 -- ===== First Run Experience =====
 wezterm.on('gui-startup', function(cmd)

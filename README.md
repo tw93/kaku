@@ -52,6 +52,43 @@ Download the latest release for macOS:
 
 **Quick fix:** `sudo xattr -d com.apple.quarantine /Applications/Kaku.app`
 
+## Usage Guide
+
+### Shortcuts
+
+Kaku comes with intuitive macOS-native shortcuts:
+
+| Action | Shortcut |
+|--------|----------|
+| **New Tab** | `Cmd + T` |
+| **New Window** | `Cmd + N` |
+| **Split Pane (Vertical)** | `Cmd + D` |
+| **Split Pane (Horizontal)** | `Cmd + Shift + D` |
+| **Zoom/Unzoom Pane** | `Cmd + Shift + Enter` |
+| **Resize Pane** | `Cmd + Ctrl + Arrows` |
+| **Close Tab/Pane** | `Cmd + W` |
+| **Navigate Tabs** | `Cmd + [`, `Cmd + ]` or `Cmd + 1-9` |
+| **Navigate Panes** | `Cmd + Opt + Arrows` |
+| **Clear Screen** | `Cmd + R` |
+| **Font Size** | `Cmd + +`, `Cmd + -`, `Cmd + 0` |
+
+### Smart Navigation (z)
+
+Kaku includes `z` (powered by **zoxide**), a smarter way to navigate directories. It remembers where you go, so you can jump there quickly.
+
+- **Jump to a directory**: `z foo` (jumps to `~/work/foo`)
+- **Interactive selection**: `zi foo` (select from list)
+- **Go back**: `z -`
+
+### Useful Aliases
+
+Common aliases are pre-configured for productivity:
+
+- `ll`: List files (detailed)
+- `la`: List all files (including hidden)
+- `...`: Go up 2 directories (`cd ../..`)
+- `g`: Git short command
+
 ## Configuration
 
 Kaku uses a prioritized configuration system to ensure stability while allowing customization.
