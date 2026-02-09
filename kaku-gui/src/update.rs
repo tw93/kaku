@@ -113,7 +113,7 @@ fn update_checker() {
     let update_interval = Duration::from_secs(configuration().check_for_updates_interval_seconds);
     let initial_interval = Duration::from_secs(10);
 
-    let force_ui = std::env::var_os("WEZTERM_ALWAYS_SHOW_UPDATE_UI").is_some();
+    let force_ui = std::env::var_os("KAKU_ALWAYS_SHOW_UPDATE_UI").is_some();
 
     let update_file_name = config::DATA_DIR.join("check_update");
     let delay = update_file_name
