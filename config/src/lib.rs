@@ -336,6 +336,13 @@ where
     ConfigSubscription(CONFIG.subscribe(subscriber))
 }
 
+pub fn try_subscribe_to_config_reload<F>(subscriber: F) -> Option<ConfigSubscription>
+where
+    F: Fn() -> bool + 'static + Send,
+{
+    CONFIG.try_subscribe(subscriber).map(ConfigSubscription)
+}
+
 /// Spawn a future that will run with an optional Lua state from the most
 /// recently loaded lua configuration.
 /// The `func` argument is passed the lua state and must return a Future.
@@ -804,6 +811,14 @@ impl Configuration {
     {
         let mut inner = self.inner.lock().unwrap();
         inner.subscribe(subscriber)
+    }
+
+    fn try_subscribe<F>(&self, subscriber: F) -> Option<usize>
+    where
+        F: Fn() -> bool + 'static + Send,
+    {
+        let mut inner = self.inner.try_lock().ok()?;
+        Some(inner.subscribe(subscriber))
     }
 
     fn unsub(&self, sub_id: usize) {

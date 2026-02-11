@@ -1387,9 +1387,10 @@ impl Config {
         // references a scheme not already defined inline.  This avoids
         // directory enumeration + TOML parsing on every startup for users
         // who don't use custom .toml color scheme files.
-        let need_disk_schemes = cfg.color_scheme.as_ref().map_or(false, |name| {
-            !cfg.color_schemes.contains_key(name.as_str())
-        });
+        let need_disk_schemes = cfg
+            .color_scheme
+            .as_ref()
+            .map_or(false, |name| !cfg.color_schemes.contains_key(name.as_str()));
         if need_disk_schemes {
             cfg.load_color_schemes(&cfg.compute_color_scheme_dirs())
                 .ok();

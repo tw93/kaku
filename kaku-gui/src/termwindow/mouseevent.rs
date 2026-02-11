@@ -240,7 +240,10 @@ impl super::TermWindow {
                     return;
                 }
                 if event.mouse_buttons != WMB::NONE
-                    && !matches!(self.current_mouse_capture, Some(MouseCapture::TerminalPane(_)))
+                    && !matches!(
+                        self.current_mouse_capture,
+                        Some(MouseCapture::TerminalPane(_))
+                    )
                 {
                     // While a non-terminal drag is active (for example native
                     // window dragging in title/tab areas), ignore wheel input

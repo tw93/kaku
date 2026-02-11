@@ -64,8 +64,8 @@ use std::time::{Duration, Instant};
 use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::SequenceNo;
 use wezterm_dynamic::Value;
-use wezterm_font::FontConfiguration;
 use wezterm_font::units::PixelLength;
+use wezterm_font::FontConfiguration;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
 use wezterm_term::{Alert, Progress, StableRowIndex, TerminalConfiguration, TerminalSize};
@@ -723,12 +723,8 @@ impl TermWindow {
         let physical_rows = size.rows as usize;
         let physical_cols = size.cols as usize;
 
-        let (render_metrics, _metrics_cache_hit) = render_metrics_from_cache_or_compute(
-            &fontconfig,
-            &config,
-            dpi,
-            persisted_font_scale,
-        )?;
+        let (render_metrics, _metrics_cache_hit) =
+            render_metrics_from_cache_or_compute(&fontconfig, &config, dpi, persisted_font_scale)?;
         log::trace!("using render_metrics {:#?}", render_metrics);
 
         // Initially we have only a single tab, so take that into account
