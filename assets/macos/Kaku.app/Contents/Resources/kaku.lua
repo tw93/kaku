@@ -383,15 +383,16 @@ config.keys = {
     action = wezterm.action.HideApplication,
   },
 
-  -- Cmd+Shift+R: reload configuration
-  {
-    key = 'R',
-    mods = 'CMD|SHIFT',
-    action = wezterm.action.ReloadConfiguration,
-  },
+  -- Cmd+Shift+.: reload configuration
   {
     key = '.',
     mods = 'CMD|SHIFT',
+    action = wezterm.action.ReloadConfiguration,
+  },
+  -- Some layouts report Shift+. as mapped:>, keep this as a fallback.
+  {
+    key = 'mapped:>',
+    mods = 'CMD',
     action = wezterm.action.ReloadConfiguration,
   },
 

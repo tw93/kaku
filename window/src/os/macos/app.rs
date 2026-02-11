@@ -156,6 +156,14 @@ extern "C" fn kaku_perform_key_assignment(_self: &mut Object, _sel: Sel, menu_it
     }
 }
 
+extern "C" fn show_settings_window(_self: &mut Object, _sel: Sel, _sender: *mut Object) {
+    if let Some(conn) = Connection::get() {
+        conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
+            KeyAssignment::EmitEvent("open-kaku-config".to_string()),
+        ));
+    }
+}
+
 extern "C" fn application_open_file(
     this: &mut Object,
     _sel: Sel,
@@ -223,6 +231,16 @@ fn get_class() -> &'static Class {
             cls.add_method(
                 sel!(kakuPerformKeyAssignment:),
                 kaku_perform_key_assignment as extern "C" fn(&mut Object, Sel, *mut Object),
+            );
+            // macOS may route "Settings..." through one of these standard selectors
+            // instead of our custom menu-item selector.
+            cls.add_method(
+                sel!(showSettingsWindow:),
+                show_settings_window as extern "C" fn(&mut Object, Sel, *mut Object),
+            );
+            cls.add_method(
+                sel!(showPreferencesWindow:),
+                show_settings_window as extern "C" fn(&mut Object, Sel, *mut Object),
             );
             cls.add_method(
                 sel!(applicationOpenUntitledFile:),

@@ -2906,7 +2906,14 @@ impl TermWindow {
             CloseCurrentTab { confirm } => self.close_current_tab(*confirm),
             CloseCurrentPane { confirm } => self.close_current_pane(*confirm),
             Nop | DisableDefaultAssignment => {}
-            ReloadConfiguration => config::reload(),
+            ReloadConfiguration => {
+                config::reload();
+                crate::frontend::refresh_fast_config_snapshot();
+                wezterm_toast_notification::persistent_toast_notification(
+                    "Kaku",
+                    "Configuration reloaded",
+                );
+            }
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,
@@ -2972,8 +2979,12 @@ impl TermWindow {
                 self.do_open_link_at_mouse_cursor(pane);
             }
             EmitEvent(name) => {
-                if name == "update-kaku" {
-                    crate::frontend::update_kaku();
+                if name == "update-kaku" || name == "run-kaku-update" {
+                    pane.writer().write_all(b"kaku update\n")?;
+                } else if name == "run-kaku-cli" {
+                    pane.writer().write_all(b"kaku\n")?;
+                } else if name == "open-kaku-config" {
+                    crate::frontend::open_kaku_config();
                 } else {
                     self.emit_window_event(name, None);
                 }

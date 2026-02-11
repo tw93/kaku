@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use wezterm_term::{Alert, ClipboardSelection};
 use wezterm_toast_notification::*;
@@ -35,7 +34,6 @@ impl Drop for GuiFrontEnd {
     }
 }
 
-static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 lazy_static::lazy_static! {
     static ref FAST_CONFIG_SNAPSHOT: Mutex<Option<config::ConfigHandle>> = Mutex::new(None);
 }
@@ -49,15 +47,12 @@ fn fast_config_snapshot() -> config::ConfigHandle {
     cfg
 }
 
-fn refresh_fast_config_snapshot() {
+pub(crate) fn refresh_fast_config_snapshot() {
     let cfg = config::configuration();
     FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg);
 }
 
-pub fn update_kaku() {
-    if UPDATE_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        return;
-    }
+pub fn open_kaku_config() {
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<()> {
             let current_exe = std::env::current_exe().context("resolve executable path")?;
@@ -70,57 +65,53 @@ pub fn update_kaku() {
                 anyhow::bail!("could not find kaku binary at {}", kaku_bin.display());
             }
 
-            let target_app = current_exe
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .ok_or_else(|| anyhow::anyhow!("failed to locate Kaku.app from executable path"))?;
-
-            let mut child = Command::new(&kaku_bin)
-                .arg("update")
-                .env("KAKU_UPDATE_TARGET_APP", target_app)
+            let ensure_status = Command::new(&kaku_bin)
+                .arg("config")
+                .arg("--ensure-only")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()
+                .status()
                 .with_context(|| format!("failed to launch {}", kaku_bin.display()))?;
-
-            // Wait for kaku update to finish so UPDATE_IN_PROGRESS stays true
-            // for the full duration of the update, not just the spawn call.
-            let status = child.wait().context("failed to wait for kaku update")?;
-            if !status.success() {
+            if !ensure_status.success() {
                 anyhow::bail!(
-                    "kaku update exited with status {}",
-                    status.code().unwrap_or(-1)
+                    "kaku config --ensure-only exited with status {}",
+                    ensure_status.code().unwrap_or(-1)
                 );
+            }
+
+            let home = std::env::var("HOME").context("resolve HOME for config path")?;
+            let config_path = format!("{home}/.config/kaku/kaku.lua");
+            let quoted_config_path =
+                shlex::try_quote(&config_path).context("quote config path for shell open")?;
+            let open_script = format!(
+                "if command -v code >/dev/null 2>&1; then code -g {0}; else /usr/bin/open {0}; fi",
+                quoted_config_path
+            );
+            let open_status = Command::new("/bin/sh")
+                .arg("-lc")
+                .arg(open_script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .context("open kaku.lua in editor")?;
+            if !open_status.success() {
+                anyhow::bail!("failed to open {}", config_path);
             }
 
             Ok(())
         })();
 
-        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
-        match result {
-            Ok(()) => {
-                promise::spawn::spawn_into_main_thread(async move {
-                    if let Some(conn) = Connection::get() {
-                        conn.alert(
-                            "Update Kaku",
-                            "Update command finished. If a new version was found, Kaku will relaunch automatically.",
-                        );
-                    }
-                })
-                .detach();
-            }
-            Err(err) => {
-                let msg = format!("Failed to start update: {:#}", err);
-                log::error!("{}", msg);
-                promise::spawn::spawn_into_main_thread(async move {
-                    if let Some(conn) = Connection::get() {
-                        conn.alert("Update Kaku", &msg);
-                    }
-                })
-                .detach();
-            }
+        if let Err(err) = result {
+            let msg = format!("Failed to open settings: {:#}", err);
+            log::error!("{}", msg);
+            promise::spawn::spawn_into_main_thread(async move {
+                if let Some(conn) = Connection::get() {
+                    conn.alert("Settings", &msg);
+                }
+            })
+            .detach();
         }
     });
 }
@@ -409,8 +400,33 @@ impl GuiFrontEnd {
                 }
 
                 match action {
-                    KeyAssignment::EmitEvent(event) if event == "update-kaku" => {
-                        update_kaku();
+                    KeyAssignment::EmitEvent(event)
+                        if event == "update-kaku" || event == "run-kaku-update" =>
+                    {
+                        spawn_command(
+                            &SpawnCommand {
+                                args: Some(vec!["kaku".to_string(), "update".to_string()]),
+                                ..Default::default()
+                            },
+                            SpawnWhere::NewWindow,
+                        );
+                    }
+                    KeyAssignment::EmitEvent(event) if event == "run-kaku-cli" => {
+                        spawn_command(
+                            &SpawnCommand {
+                                args: Some(vec!["kaku".to_string()]),
+                                ..Default::default()
+                            },
+                            SpawnWhere::NewWindow,
+                        );
+                    }
+                    KeyAssignment::EmitEvent(event) if event == "open-kaku-config" => {
+                        open_kaku_config();
+                    }
+                    KeyAssignment::ReloadConfiguration => {
+                        config::reload();
+                        refresh_fast_config_snapshot();
+                        persistent_toast_notification("Kaku", "Configuration reloaded");
                     }
                     KeyAssignment::QuitApplication => {
                         // If we get here, there are no windows that could have received
