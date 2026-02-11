@@ -54,7 +54,7 @@ fn refresh_fast_config_snapshot() {
     FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg);
 }
 
-pub fn check_for_updates() {
+pub fn update_kaku() {
     if UPDATE_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -104,8 +104,8 @@ pub fn check_for_updates() {
                 promise::spawn::spawn_into_main_thread(async move {
                     if let Some(conn) = Connection::get() {
                         conn.alert(
-                            "Check for Updates",
-                            "Checking for updates in background. Kaku will relaunch if a new version is found.",
+                            "Update Kaku",
+                            "Update command finished. If a new version was found, Kaku will relaunch automatically.",
                         );
                     }
                 })
@@ -116,7 +116,7 @@ pub fn check_for_updates() {
                 log::error!("{}", msg);
                 promise::spawn::spawn_into_main_thread(async move {
                     if let Some(conn) = Connection::get() {
-                        conn.alert("Check for Updates", &msg);
+                        conn.alert("Update Kaku", &msg);
                     }
                 })
                 .detach();
@@ -409,8 +409,8 @@ impl GuiFrontEnd {
                 }
 
                 match action {
-                    KeyAssignment::EmitEvent(event) if event == "check-for-update" => {
-                        check_for_updates();
+                    KeyAssignment::EmitEvent(event) if event == "update-kaku" => {
+                        update_kaku();
                     }
                     KeyAssignment::QuitApplication => {
                         // If we get here, there are no windows that could have received

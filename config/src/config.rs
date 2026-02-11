@@ -1084,12 +1084,13 @@ impl Config {
                 Ok(default_config_with_overrides_applied()?.compute_extra_defaults(None))
             });
 
-        Ok(LoadedConfig {
+        let loaded = LoadedConfig {
             config: Ok(config?),
             file_name: None,
             lua: Some(make_lua_context(Path::new(""))?),
             warnings,
-        })
+        };
+        Ok(loaded)
     }
 
     fn try_load(
@@ -1112,8 +1113,6 @@ impl Config {
 
         let (config, warnings) =
             wezterm_dynamic::Error::capture_warnings(|| -> anyhow::Result<Config> {
-                let cfg: Config;
-
                 let config: mlua::Value = smol::block_on(
                     // Skip a potential BOM that Windows software may have placed in the
                     // file. Note that we can't catch this happening for files that are
@@ -1124,17 +1123,13 @@ impl Config {
                 )?;
                 let config = Config::apply_overrides_to(&lua, config)?;
                 let config = Config::apply_overrides_obj_to(&lua, config, overrides)?;
-                cfg = Config::from_lua(config, &lua).with_context(|| {
+                let cfg = Config::from_lua(config, &lua).with_context(|| {
                     format!(
                         "Error converting lua value returned by script {} to Config struct",
                         p.display()
                     )
                 })?;
                 cfg.check_consistency()?;
-
-                // Compute but discard the key bindings here so that we raise any
-                // problems earlier than we use them.
-                let _ = cfg.key_bindings();
 
                 std::env::set_var("KAKU_CONFIG_FILE", p);
                 if let Some(dir) = p.parent() {
@@ -1143,9 +1138,10 @@ impl Config {
                 Ok(cfg)
             });
         let cfg = config?;
+        let cfg = cfg.compute_extra_defaults(Some(p));
 
         Ok(Some(LoadedConfig {
-            config: Ok(cfg.compute_extra_defaults(Some(p))),
+            config: Ok(cfg),
             file_name: Some(p.to_path_buf()),
             lua: Some(lua),
             warnings,

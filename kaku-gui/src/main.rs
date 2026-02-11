@@ -589,7 +589,6 @@ fn setup_mux(
             .unwrap_or(mux::DEFAULT_WORKSPACE),
     );
     mux.set_active_workspace(&default_workspace_name);
-    crate::update::load_last_release_info_and_set_banner();
 
     let default_name =
         default_domain_name.unwrap_or(config.default_domain.as_deref().unwrap_or("local"));
@@ -792,7 +791,6 @@ fn run() -> anyhow::Result<()> {
     config::lua::add_context_setup_func(crate::scripting::register);
     config::lua::add_context_setup_func(crate::stats::register);
 
-    stats::Stats::init()?;
     let _saver = umask::UmaskSaver::new();
 
     config::common_init(
@@ -800,6 +798,7 @@ fn run() -> anyhow::Result<()> {
         &opts.config_override,
         opts.skip_config,
     )?;
+    stats::Stats::init()?;
     let config = config::configuration();
     if let Some(value) = &config.default_ssh_auth_sock {
         std::env::set_var("SSH_AUTH_SOCK", value);

@@ -4,7 +4,9 @@ local wezterm = require 'wezterm'
 
 local config = {}
 
-if wezterm.config_builder then
+-- `config_builder` validates every assignment and is expensive on large configs.
+-- Keep startup fast by default; enable strict validation only when debugging config.
+if os.getenv('KAKU_STRICT_CONFIG') == '1' and wezterm.config_builder then
   config = wezterm.config_builder()
 end
 
@@ -157,8 +159,8 @@ config.font_rules = {
 
 config.bold_brightens_ansi_colors = false
 config.font_size = 17.0
-config.line_height = 1.28
-config.cell_width = 1.02
+config.line_height = 1.30
+config.cell_width = 1.00
 config.harfbuzz_features = { 'calt=0', 'clig=0', 'liga=0' }
 config.use_cap_height_to_scale_fallback_fonts = false
 
@@ -166,7 +168,7 @@ config.freetype_load_target = 'Normal'
 -- config.freetype_render_target = 'HorizontalLcd'
 
 config.allow_square_glyphs_to_overflow_width = 'WhenFollowedBySpace'
-config.custom_block_glyphs = true
+config.custom_block_glyphs = false
 
 -- config.freetype_load_target = 'Normal'
 -- config.freetype_render_target = 'HorizontalLcd'

@@ -116,10 +116,7 @@ pub fn register(lua: &Lua) -> anyhow::Result<()> {
     {
         let mut sub = CONFIG_SUBSCRIPTION.lock().unwrap();
         if sub.is_none() {
-            if let Some(subscription) = config::try_subscribe_to_config_reload(config_was_reloaded)
-            {
-                sub.replace(subscription);
-            }
+            sub.replace(config::subscribe_to_config_reload(config_was_reloaded));
         }
     }
     lua.set_named_registry_value(SCHEDULED_EVENTS, Vec::<ScheduledEvent>::new())?;

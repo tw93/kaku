@@ -461,7 +461,7 @@ impl CommandDef {
                             "",
                         );
                         check_update.set_represented_item(RepresentedItem::KeyAssignment(
-                            KeyAssignment::EmitEvent("check-for-update".to_string()),
+                            KeyAssignment::EmitEvent("update-kaku".to_string()),
                         ));
                         menu.add_item(&check_update);
 

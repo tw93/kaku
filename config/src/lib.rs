@@ -336,13 +336,6 @@ where
     ConfigSubscription(CONFIG.subscribe(subscriber))
 }
 
-pub fn try_subscribe_to_config_reload<F>(subscriber: F) -> Option<ConfigSubscription>
-where
-    F: Fn() -> bool + 'static + Send,
-{
-    CONFIG.try_subscribe(subscriber).map(ConfigSubscription)
-}
-
 /// Spawn a future that will run with an optional Lua state from the most
 /// recently loaded lua configuration.
 /// The `func` argument is passed the lua state and must return a Future.
@@ -428,9 +421,6 @@ fn default_config_with_overrides_applied() -> anyhow::Result<Config> {
         },
     )
     .context("Error converting lua value from overrides to Config struct")?;
-    // Compute but discard the key bindings here so that we raise any
-    // problems earlier than we use them.
-    let _ = cfg.key_bindings();
 
     cfg.check_consistency().context("check_consistency")?;
 
@@ -507,10 +497,11 @@ pub fn set_config_file_override(path: &Path) {
 pub fn set_config_overrides(items: &[(String, String)]) -> anyhow::Result<()> {
     *CONFIG_OVERRIDES.lock().unwrap() = items.to_vec();
 
-    // Keep this eager validation call even when `items` is empty.
-    // It primes lua context setup hooks that install config-reload
-    // subscriptions; deferring this can deadlock during initial reload.
-    let _ = default_config_with_overrides_applied()?;
+    // Only validate overrides eagerly when override items were supplied.
+    // This avoids creating an extra throwaway Lua VM on normal cold start.
+    if !items.is_empty() {
+        let _ = default_config_with_overrides_applied()?;
+    }
     Ok(())
 }
 
@@ -674,13 +665,13 @@ impl ConfigInner {
     /// configuration.
     /// On failure, retain the existing configuration but
     /// replace any captured error message.
-    fn reload(&mut self) {
+    fn apply_loaded(&mut self, loaded: LoadedConfig) {
         let LoadedConfig {
             config,
             file_name,
             lua,
             warnings,
-        } = Config::load();
+        } = loaded;
 
         self.warnings = warnings;
 
@@ -786,12 +777,14 @@ impl ConfigInner {
 
 pub struct Configuration {
     inner: Mutex<ConfigInner>,
+    reload_epoch: AtomicUsize,
 }
 
 impl Configuration {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(ConfigInner::new()),
+            reload_epoch: AtomicUsize::new(0),
         }
     }
 
@@ -811,14 +804,6 @@ impl Configuration {
     {
         let mut inner = self.inner.lock().unwrap();
         inner.subscribe(subscriber)
-    }
-
-    fn try_subscribe<F>(&self, subscriber: F) -> Option<usize>
-    where
-        F: Fn() -> bool + 'static + Send,
-    {
-        let mut inner = self.inner.try_lock().ok()?;
-        Some(inner.subscribe(subscriber))
     }
 
     fn unsub(&self, sub_id: usize) {
@@ -851,8 +836,16 @@ impl Configuration {
 
     /// Reload the configuration
     pub fn reload(&self) {
+        let reload_id = self.reload_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        let loaded = Config::load();
+        if self.reload_epoch.load(Ordering::Relaxed) != reload_id {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
-        inner.reload();
+        if self.reload_epoch.load(Ordering::Relaxed) != reload_id {
+            return;
+        }
+        inner.apply_loaded(loaded);
     }
 
     /// Returns a copy of any captured error message.

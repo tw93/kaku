@@ -2936,7 +2936,6 @@ impl TermWindow {
             QuitApplication => {
                 let mux = Mux::get();
                 let config = &self.config;
-                log::info!("QuitApplication over here (window)");
 
                 match config.window_close_confirmation {
                     WindowCloseConfirmation::NeverPrompt => {
@@ -2973,8 +2972,8 @@ impl TermWindow {
                 self.do_open_link_at_mouse_cursor(pane);
             }
             EmitEvent(name) => {
-                if name == "check-for-update" {
-                    crate::frontend::check_for_updates();
+                if name == "update-kaku" {
+                    crate::frontend::update_kaku();
                 } else {
                     self.emit_window_event(name, None);
                 }
