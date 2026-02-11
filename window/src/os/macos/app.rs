@@ -12,8 +12,14 @@ use objc::declare::ClassDecl;
 use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::*;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 const CLS_NAME: &str = "KakuAppDelegate";
+
+thread_local! {
+    static LAST_OPEN_UNTITLED_SPAWN: RefCell<Option<Instant>> = RefCell::new(None);
+}
 
 extern "C" fn application_should_terminate(
     _self: &mut Object,
@@ -54,6 +60,10 @@ extern "C" fn application_should_terminate(
 }
 
 fn terminate_now() -> u64 {
+    // Persist the key (frontmost) window's geometry before the event loop
+    // stops. This is the reliable save path for Cmd+Q; window_will_close
+    // may not fire for every window before the process exits.
+    super::window::on_app_terminating();
     if let Some(conn) = Connection::get() {
         conn.terminate_message_loop();
     }
@@ -84,9 +94,33 @@ extern "C" fn application_open_untitled_file(
     log::debug!("application_open_untitled_file launched={launched}");
     if let Some(conn) = Connection::get() {
         if launched == YES {
-            conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
-                KeyAssignment::SpawnWindow,
-            ));
+            let existing_window = {
+                let windows = conn.windows.borrow();
+                windows.values().next().cloned()
+            };
+            if let Some(window) = existing_window {
+                window.borrow_mut().focus();
+            } else {
+                let should_spawn = LAST_OPEN_UNTITLED_SPAWN.with(|last| {
+                    let now = Instant::now();
+                    let mut last = last.borrow_mut();
+                    let too_soon = last.map_or(false, |prior| {
+                        now.duration_since(prior) < Duration::from_millis(800)
+                    });
+                    if too_soon {
+                        false
+                    } else {
+                        *last = Some(now);
+                        true
+                    }
+                });
+
+                if should_spawn {
+                    conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
+                        KeyAssignment::SpawnWindow,
+                    ));
+                }
+            }
         }
         return YES;
     }

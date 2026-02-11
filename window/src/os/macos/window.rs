@@ -49,6 +49,7 @@ use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use wezterm_font::FontConfiguration;
 use wezterm_input_types::{is_ascii_control, IntegratedTitleButtonStyle, KeyboardLedStatus};
@@ -429,6 +430,188 @@ fn set_window_position(window: *mut Object, coords: ScreenPoint) {
     }
 }
 
+const MIN_RESTORE_WIDTH: usize = 200;
+const MIN_RESTORE_HEIGHT: usize = 120;
+
+fn point_in_rect(pt: NSPoint, rect: NSRect) -> bool {
+    let rect: euclid::Rect<f64, ()> =
+        euclid::rect(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height);
+    rect.contains(euclid::point2(pt.x, pt.y))
+}
+
+fn point_in_any_screen(pt: NSPoint) -> bool {
+    unsafe {
+        let screens = NSScreen::screens(nil);
+        for idx in 0..screens.count() {
+            let screen = screens.objectAtIndex(idx);
+            let frame = NSScreen::frame(screen);
+            if point_in_rect(pt, frame) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PersistedWindowGeometry {
+    x: isize,
+    y: isize,
+    width: usize,
+    height: usize,
+}
+
+fn config_dir_file(name: &str) -> PathBuf {
+    config::CONFIG_DIRS
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config::HOME_DIR.join(".config").join("kaku"))
+        .join(name)
+}
+
+fn persisted_window_geometry_file() -> PathBuf {
+    config_dir_file(".kaku_window_geometry")
+}
+
+fn legacy_persisted_window_position_file() -> PathBuf {
+    config_dir_file(".kaku_window_position")
+}
+
+fn window_geometry(window: *mut Object) -> PersistedWindowGeometry {
+    unsafe {
+        let frame = NSWindow::frame(window);
+        let content_frame = NSWindow::contentRectForFrameRect_(window, frame);
+        let top_left = NSPoint::new(
+            content_frame.origin.x,
+            content_frame.origin.y + content_frame.size.height,
+        );
+        let pos = cartesian_to_screen_point(top_left);
+        PersistedWindowGeometry {
+            x: pos.x,
+            y: pos.y,
+            width: content_frame.size.width.round().max(1.0) as usize,
+            height: content_frame.size.height.round().max(1.0) as usize,
+        }
+    }
+}
+
+fn parse_persisted_window_geometry(s: &str) -> Option<PersistedWindowGeometry> {
+    let mut parts = s.trim().split(',').map(str::trim);
+    let x = parts.next()?.parse::<isize>().ok()?;
+    let y = parts.next()?.parse::<isize>().ok()?;
+    let width = parts.next()?.parse::<usize>().ok()?;
+    let height = parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(PersistedWindowGeometry {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn load_persisted_window_geometry() -> Option<PersistedWindowGeometry> {
+    let file_name = persisted_window_geometry_file();
+    if let Ok(contents) = std::fs::read_to_string(&file_name) {
+        match parse_persisted_window_geometry(&contents) {
+            Some(geometry) => return Some(geometry),
+            None => log::warn!(
+                "Failed to parse persisted window geometry from {:?}: {:?}",
+                file_name,
+                contents.trim()
+            ),
+        }
+    }
+
+    // Compatibility for builds that only persisted x,y.
+    let legacy_file = legacy_persisted_window_position_file();
+    let coords = std::fs::read_to_string(legacy_file).ok()?;
+    let (x, y) = coords.trim().split_once(',')?;
+    let x = x.trim().parse::<isize>().ok()?;
+    let y = y.trim().parse::<isize>().ok()?;
+    Some(PersistedWindowGeometry {
+        x,
+        y,
+        width: 0,
+        height: 0,
+    })
+}
+
+/// Set when `applicationShouldTerminate` confirms quit, so that individual
+/// `window_will_close` callbacks know not to overwrite the geometry that
+/// `on_app_terminating` already persisted from the key window.
+pub(crate) static TERMINATING: AtomicBool = AtomicBool::new(false);
+
+/// Called from the app delegate when the user confirms quit.
+/// Persists the key (frontmost) window's geometry as a reliable safety net
+/// before the event loop is stopped.
+pub(crate) fn on_app_terminating() {
+    let mut persisted = false;
+    let key_window: id = unsafe { msg_send![NSApplication::sharedApplication(nil), keyWindow] };
+    if !key_window.is_null() {
+        persist_window_geometry(key_window);
+        persisted = true;
+    }
+
+    if !persisted {
+        let main_window: id = unsafe { msg_send![NSApplication::sharedApplication(nil), mainWindow] };
+        if !main_window.is_null() {
+            persist_window_geometry(main_window);
+            persisted = true;
+        }
+    }
+
+    if !persisted {
+        if let Some(conn) = Connection::get() {
+            if let Some(window_inner) = conn.windows.borrow().values().next() {
+                persist_window_geometry(*window_inner.borrow().window);
+            }
+        }
+    }
+
+    TERMINATING.store(true, Ordering::Relaxed);
+}
+
+fn persist_window_geometry(window: *mut Object) {
+    let style_mask = unsafe { NSWindow::styleMask(window) };
+    if style_mask.contains(NSWindowStyleMask::NSFullScreenWindowMask) {
+        return;
+    }
+
+    let file_name = persisted_window_geometry_file();
+    let geometry = window_geometry(window);
+    if let Some(parent) = file_name.parent() {
+        if let Err(err) = config::create_user_owned_dirs(parent) {
+            log::warn!(
+                "Failed to create config directory for persisted window geometry {:?}: {:#}",
+                parent,
+                err
+            );
+            return;
+        }
+    }
+
+    if let Err(err) = std::fs::write(
+        &file_name,
+        format!(
+            "{},{},{},{}\n",
+            geometry.x, geometry.y, geometry.width, geometry.height
+        ),
+    ) {
+        log::warn!(
+            "Failed to persist window geometry ({}, {}, {}, {}) to {:?}: {:#}",
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            file_name,
+            err
+        );
+    }
+}
+
 impl Window {
     pub async fn new_window<F>(
         _class_name: &str,
@@ -455,15 +638,31 @@ impl Window {
         } = conn.resolve_geometry(geometry);
 
         let scale_factor = (conn.default_dpi() / crate::DEFAULT_DPI) as usize;
-        let width = width / scale_factor;
-        let height = height / scale_factor;
+        let mut width = width / scale_factor;
+        let mut height = height / scale_factor;
         let x = x.map(|x| x / scale_factor as i32);
         let y = y.map(|y| y / scale_factor as i32);
 
-        let initial_pos = match (x, y) {
+        let explicit_initial_pos = match (x, y) {
             (Some(x), Some(y)) => Some(ScreenPoint::new(x as isize, y as isize)),
             _ => None,
         };
+        // Only restore persisted geometry for the very first window; subsequent
+        // windows should use the normal cascade so they don't all stack on top
+        // of each other.
+        let is_first_window = conn.windows.borrow().is_empty();
+        let persisted_geometry = if explicit_initial_pos.is_none() && is_first_window {
+            load_persisted_window_geometry()
+        } else {
+            None
+        };
+        let persisted_initial_pos = persisted_geometry.map(|g| ScreenPoint::new(g.x, g.y));
+        if let Some(geometry) = persisted_geometry {
+            if geometry.width >= MIN_RESTORE_WIDTH && geometry.height >= MIN_RESTORE_HEIGHT {
+                width = geometry.width;
+                height = geometry.height;
+            }
+        }
 
         unsafe {
             let style_mask = decoration_to_mask(
@@ -549,22 +748,20 @@ impl Window {
             let active_screen = NSScreen::mainScreen(nil);
             let active_screen_frame = NSScreen::frame(active_screen);
 
-            fn point_in_rect(pt: NSPoint, rect: NSRect) -> bool {
-                let rect: euclid::Rect<f64, ()> = euclid::rect(
-                    rect.origin.x,
-                    rect.origin.y,
-                    rect.size.width,
-                    rect.size.height,
-                );
-                rect.contains(euclid::point2(pt.x, pt.y))
-            }
+
 
             LAST_POSITION.with(|last_pos| {
-                if let Some(pos) = initial_pos {
+                if let Some(pos) = explicit_initial_pos {
                     // Put it where they asked it to be, without influencing
                     // future positioning info
                     set_window_position(*window, pos);
                     return;
+                }
+                if let Some(pos) = persisted_initial_pos {
+                    if point_in_any_screen(screen_point_to_cartesian(pos)) {
+                        set_window_position(*window, pos);
+                        return;
+                    }
                 }
                 let pos = last_pos.borrow_mut().take();
                 let next_pos = match pos {
@@ -1192,7 +1389,7 @@ impl WindowInner {
         }
     }
 
-    fn focus(&mut self) {
+    pub(crate) fn focus(&mut self) {
         unsafe {
             self.window.makeKeyAndOrderFront_(nil);
         }
@@ -2300,13 +2497,26 @@ impl WindowView {
 
     extern "C" fn window_will_close(this: &mut Object, _sel: Sel, _id: id) {
         if let Some(this) = Self::get_this(this) {
+            let conn = Connection::get().unwrap();
+            // During app termination, on_app_terminating() already persisted the
+            // key window's geometry. Skip here to avoid overwriting it with a
+            // random window's data as AppKit closes each window in turn.
+            // For individual window closes, only persist for the last window so
+            // we consistently restore the user's most recent session.
+            if !TERMINATING.load(Ordering::Relaxed) && conn.windows.borrow().len() == 1 {
+                if let Some(window) = this.inner.borrow().window.as_ref() {
+                    let window = window.load();
+                    if !window.is_null() {
+                        persist_window_geometry(*window);
+                    }
+                }
+            }
             // Advise the window of its impending death
             this.inner
                 .borrow_mut()
                 .events
                 .dispatch(WindowEvent::Destroyed);
             this.update_application_presentation(false);
-            let conn = Connection::get().unwrap();
             let window_id = this.inner.borrow_mut().window_id;
             conn.windows.borrow_mut().remove(&window_id);
         }
@@ -2482,7 +2692,7 @@ impl WindowView {
         };
         let virtual_key = unsafe { nsevent.keyCode() };
 
-        log::debug!(
+        log::trace!(
             "key_common: chars=`{}` unmod=`{}` modifiers=`{:?}` virtual_key={:?} key_is_down:{}",
             chars.escape_debug(),
             unmod.escape_debug(),
@@ -2806,7 +3016,7 @@ impl WindowView {
             .normalize_shift()
             .resurface_positional_modifier_key();
 
-            log::debug!(
+            log::trace!(
                 "key_common {:?} (chars={:?} unmod={:?} modifiers={:?})",
                 event,
                 chars,
