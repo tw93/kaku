@@ -25,6 +25,7 @@
 - **Built-in Shell Suite**: Comes pre-loaded with Starship, z, Delta, syntax highlighting, autosuggestions, and autocompletions.
 - **Fast & Lightweight**: 40% smaller binary, instant startup, lazy loading, stripped-down GPU-accelerated core.
 - **Lua Scripting**: Retains the full power of WezTerm's Lua engine for infinite customization.
+- **Safe Update Flow**: Built-in updater (`kaku update`) plus Homebrew-aware upgrade path.
 
 ## Quick Start
 
@@ -72,6 +73,12 @@ Kaku is fully configurable via standard Lua scripts and is 100% compatible with 
 On macOS, bundled defaults in `Kaku.app/Contents/Resources/kaku.lua` are fallback only, so user config is loaded first.
 
 Use a single user config path: `~/.config/kaku/kaku.lua`.
+
+### Updates & Reset
+
+- Check/apply update from CLI: `kaku update`
+- Remove Kaku-managed shell defaults and integration: `kaku reset` (or non-interactive `kaku reset --yes`)
+- GUI auto-update check uses numeric version comparison (for example `0.1.10` is correctly newer than `0.1.9`).
 
 ## Why Kaku?
 
