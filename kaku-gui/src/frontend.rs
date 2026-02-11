@@ -13,6 +13,7 @@ use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::convert::TryInto;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use wezterm_term::{Alert, ClipboardSelection};
@@ -294,14 +295,19 @@ impl GuiFrontEnd {
         log::trace!("Got app event {event:?}");
         match event {
             ApplicationEvent::OpenCommandScript(file_name) => {
-                let quoted_file_name = match shlex::try_quote(&file_name) {
-                    Ok(name) => name.to_owned().to_string(),
-                    Err(_) => {
-                        log::error!(
-                            "OpenCommandScript: {file_name} has embedded NUL bytes and
-                             cannot be launched via the shell"
-                        );
-                        return;
+                let is_directory = Path::new(&file_name).is_dir();
+                let quoted_file_name = if is_directory {
+                    None
+                } else {
+                    match shlex::try_quote(&file_name) {
+                        Ok(name) => Some(name.to_owned().to_string()),
+                        Err(_) => {
+                            log::error!(
+                                "OpenCommandScript: {file_name} has embedded NUL bytes and
+                                 cannot be launched via the shell"
+                            );
+                            return;
+                        }
                     }
                 };
                 promise::spawn::spawn(async move {
@@ -318,7 +324,11 @@ impl GuiFrontEnd {
                     let window_id = None;
                     let pane_id = None;
                     let cmd = None;
-                    let cwd = None;
+                    let cwd = if is_directory {
+                        Some(file_name.clone())
+                    } else {
+                        None
+                    };
                     let workspace = mux.active_workspace();
 
                     match mux
@@ -335,9 +345,16 @@ impl GuiFrontEnd {
                         .await
                     {
                         Ok((_tab, pane, _window_id)) => {
-                            log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
-                            let mut writer = pane.writer();
-                            write!(writer, "{quoted_file_name} ; exit\n").ok();
+                            if let Some(quoted_file_name) = quoted_file_name {
+                                log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
+                                let mut writer = pane.writer();
+                                write!(writer, "{quoted_file_name} ; exit\n").ok();
+                            } else {
+                                log::trace!(
+                                    "Spawned pane_id {} with cwd={file_name}",
+                                    pane.pane_id()
+                                );
+                            }
                         }
                         Err(err) => {
                             log::error!("Failed to spawn {file_name}: {err:#?}");
