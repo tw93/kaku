@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wezterm_term::{Alert, ClipboardSelection};
@@ -36,6 +37,23 @@ impl Drop for GuiFrontEnd {
 }
 
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+lazy_static::lazy_static! {
+    static ref FAST_CONFIG_SNAPSHOT: Mutex<Option<config::ConfigHandle>> = Mutex::new(None);
+}
+
+fn fast_config_snapshot() -> config::ConfigHandle {
+    if let Some(cfg) = FAST_CONFIG_SNAPSHOT.lock().unwrap().as_ref().cloned() {
+        return cfg;
+    }
+    let cfg = config::configuration();
+    FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg.clone());
+    cfg
+}
+
+fn refresh_fast_config_snapshot() {
+    let cfg = config::configuration();
+    FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg);
+}
 
 pub fn check_for_updates() {
     if UPDATE_IN_PROGRESS.swap(true, Ordering::SeqCst) {
@@ -226,14 +244,22 @@ impl GuiFrontEnd {
                         | Alert::SetUserVar { .. },
                 } => {}
                 MuxNotification::Empty => {
-                    if config::configuration().quit_when_all_windows_are_closed {
-                        promise::spawn::spawn_into_main_thread(async move {
-                            if mux::activity::Activity::count() == 0 {
-                                log::trace!("Mux is now empty, terminate gui");
-                                Connection::get().unwrap().terminate_message_loop();
-                            }
-                        })
-                        .detach();
+                    #[cfg(target_os = "macos")]
+                    {
+                        // Keep the app process alive on macOS when the last
+                        // window closes, so Dock reopen is instant and consistent.
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        if config::configuration().quit_when_all_windows_are_closed {
+                            promise::spawn::spawn_into_main_thread(async move {
+                                if mux::activity::Activity::count() == 0 {
+                                    log::trace!("Mux is now empty, terminate gui");
+                                    Connection::get().unwrap().terminate_message_loop();
+                                }
+                            })
+                            .detach();
+                        }
                     }
                 }
                 MuxNotification::SaveToDownloads { name, data } => {
@@ -284,6 +310,7 @@ impl GuiFrontEnd {
         if window_funcs::take_appearance_queried_before_gui_ready() {
             config::reload();
         }
+        refresh_fast_config_snapshot();
 
         // Build the initial menu bar synchronously during startup.
         // AppKit may inspect menu item selectors during reopen events,
@@ -294,7 +321,6 @@ impl GuiFrontEnd {
     }
 
     fn app_event_handler(event: ApplicationEvent) {
-        log::trace!("Got app event {event:?}");
         match event {
             ApplicationEvent::OpenCommandScript(file_name) => {
                 let is_directory = Path::new(&file_name).is_dir();
@@ -372,13 +398,15 @@ impl GuiFrontEnd {
                 // future.
 
                 fn spawn_command(spawn: &SpawnCommand, spawn_where: SpawnWhere) {
-                    let config = config::configuration();
+                    let config = fast_config_snapshot();
                     let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
-                    let size =
-                        config.initial_size(dpi as u32, crate::cell_pixel_dims(&config, dpi).ok());
+                    // Keep this path cheap when no GUI window exists yet:
+                    // avoid font metric resolution here and let the window layer
+                    // apply final geometry/pixel sizing.
+                    let size = config.initial_size(dpi as u32, None);
                     let term_config = Arc::new(config::TermConfig::with_config(config));
 
-                    crate::spawn::spawn_command_impl(spawn, spawn_where, size, None, term_config)
+                    crate::spawn::spawn_command_impl(spawn, spawn_where, size, None, term_config);
                 }
 
                 match action {
@@ -630,6 +658,12 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
 
     let config_subscription = config::subscribe_to_config_reload({
         move || {
+            // This callback may run while the config mutex is held;
+            // refresh asynchronously to avoid re-locking config here.
+            promise::spawn::spawn_into_main_thread(async {
+                refresh_fast_config_snapshot();
+            })
+            .detach();
             // TODO(macos): AppKit does not allow safe async menubar reconstruction
             // from a config-reload callback; the initial menubar is built synchronously
             // in try_new(). Re-enable on macOS once a safe main-thread dispatch path

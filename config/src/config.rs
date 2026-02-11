@@ -789,7 +789,7 @@ pub struct Config {
     #[dynamic(default = "default_stateless_process_list")]
     pub skip_close_confirmation_for_processes_named: Vec<String>,
 
-    #[dynamic(default = "default_true")]
+    #[dynamic(default = "default_quit_when_all_windows_are_closed")]
     pub quit_when_all_windows_are_closed: bool,
 
     #[dynamic(default = "default_true")]
@@ -1383,9 +1383,17 @@ impl Config {
             ..Default::default()
         });
 
-        // Load any additional color schemes into the color_schemes map
-        cfg.load_color_schemes(&cfg.compute_color_scheme_dirs())
-            .ok();
+        // Only scan color scheme directories from disk when the user
+        // references a scheme not already defined inline.  This avoids
+        // directory enumeration + TOML parsing on every startup for users
+        // who don't use custom .toml color scheme files.
+        let need_disk_schemes = cfg.color_scheme.as_ref().map_or(false, |name| {
+            !cfg.color_schemes.contains_key(name.as_str())
+        });
+        if need_disk_schemes {
+            cfg.load_color_schemes(&cfg.compute_color_scheme_dirs())
+                .ok();
+        }
 
         if let Some(scheme) = cfg.color_scheme.as_ref() {
             match cfg.resolve_color_scheme() {
@@ -1847,6 +1855,17 @@ fn default_stateless_process_list() -> Vec<String> {
 
 fn default_status_update_interval() -> u64 {
     1_000
+}
+
+fn default_quit_when_all_windows_are_closed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
 }
 
 fn default_alternate_buffer_wheel_scroll_speed() -> u8 {
