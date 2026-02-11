@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check build app dev check test install-hooks install-tools
+.PHONY: all fmt fmt-check build app dev check test install-tools
 
 all: build
 
@@ -31,11 +31,6 @@ fmt:
 fmt-check:
 	cargo +nightly fmt -p kaku -p kaku-gui -p mux -p wezterm-term -p termwiz -p config -p wezterm-font -- --check
 	@echo "Format check passed."
-
-install-hooks:
-	cp scripts/pre-commit .git/hooks/pre-commit
-	chmod +x .git/hooks/pre-commit
-	@echo "Pre-commit hook installed."
 
 install-tools:
 	cargo install cargo-nextest --locked
