@@ -217,5 +217,19 @@ echo -e "\n\033[1;32m❤️ Kaku environment is ready! Enjoy coding.\033[0m"
 # Persist explicitly here so successful first-run/upgrade paths are recorded.
 persist_config_version
 
-# Replace current process with zsh to enter the shell
-exec /bin/zsh -l
+# Replace current process with the configured/default login shell:
+# 1) ~/.config/kaku/kaku.lua -> config.default_prog
+# 2) $SHELL
+# 3) /bin/zsh (fallback)
+KAKU_LUA_DEST="$HOME/.config/kaku/kaku.lua"
+CONFIGURED_SHELL=""
+if [[ -f "$KAKU_LUA_DEST" ]]; then
+	CONFIGURED_SHELL="$(sed -nE "s/^[[:space:]]*config\.default_prog[[:space:]]*=[[:space:]]*\{[[:space:]]*['\"]([^'\"]+)['\"].*$/\1/p" "$KAKU_LUA_DEST" | tail -n 1)"
+fi
+
+TARGET_SHELL="${CONFIGURED_SHELL:-${SHELL:-/bin/zsh}}"
+if [[ ! -x "$TARGET_SHELL" ]]; then
+	TARGET_SHELL="/bin/zsh"
+fi
+
+exec "$TARGET_SHELL" -l
