@@ -21,6 +21,29 @@ use wezterm_term::{Line, StableRowIndex};
 use window::color::LinearRgba;
 
 impl crate::TermWindow {
+    fn clamp_split_axis_padding(
+        axis_pixels: f32,
+        mut leading_padding: f32,
+        mut trailing_padding: f32,
+    ) -> (f32, f32) {
+        if !axis_pixels.is_finite() || axis_pixels <= 0.0 {
+            return (0.0, 0.0);
+        }
+
+        leading_padding = leading_padding.max(0.0);
+        trailing_padding = trailing_padding.max(0.0);
+
+        // Keep at least one pixel for text rendering to avoid negative/empty clip rects.
+        let max_padding_total = (axis_pixels - 1.0).max(0.0);
+        let total_padding = leading_padding + trailing_padding;
+        if total_padding <= max_padding_total || total_padding <= 0.0 {
+            return (leading_padding, trailing_padding);
+        }
+
+        let scale = max_padding_total / total_padding;
+        (leading_padding * scale, trailing_padding * scale)
+    }
+
     fn paint_pane_box_model(&mut self, pos: &PositionedPane) -> anyhow::Result<()> {
         let computed = self.build_pane(pos)?;
         let mut ui_items = computed.ui_items();
@@ -363,18 +386,21 @@ impl crate::TermWindow {
             }
 
             // Use the same padding as window padding for split lines
-            let split_padding_value =
-                self.config
-                    .window_padding
-                    .left
-                    .evaluate_as_pixels(DimensionContext {
-                        dpi: self.dimensions.dpi as f32,
-                        pixel_max: self.terminal_size.pixel_width as f32,
-                        pixel_cell: cell_width,
-                    });
+            let split_padding_value = self
+                .config
+                .window_padding
+                .left
+                .evaluate_as_pixels(DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: self.terminal_size.pixel_width as f32,
+                    pixel_cell: cell_width,
+                })
+                .min(cell_width / 2.0);
+
+            let pane_pixel_width = pos.width as f32 * cell_width;
 
             // Add padding when there's a split line on the left
-            let left_split_padding = if pos.left > 0 {
+            let requested_left_split_padding = if pos.left > 0 {
                 // Not leftmost pane, has split line on left
                 split_padding_value
             } else {
@@ -382,12 +408,18 @@ impl crate::TermWindow {
             };
 
             // Add padding when there's a split line on the right
-            let right_split_padding = if pos.left + pos.width < self.terminal_size.cols as usize {
-                // Not rightmost pane, has split line on right
-                split_padding_value
-            } else {
-                0.0
-            };
+            let requested_right_split_padding =
+                if pos.left + pos.width < self.terminal_size.cols as usize {
+                    // Not rightmost pane, has split line on right
+                    split_padding_value
+                } else {
+                    0.0
+                };
+            let (left_split_padding, right_split_padding) = Self::clamp_split_axis_padding(
+                pane_pixel_width,
+                requested_left_split_padding,
+                requested_right_split_padding,
+            );
 
             let left_pixel_x = padding_left
                 + border.left.get() as f32
@@ -396,7 +428,7 @@ impl crate::TermWindow {
 
             // Calculate content width accounting for split line paddings
             let content_pixel_width =
-                (pos.width as f32 * cell_width) - left_split_padding - right_split_padding;
+                (pane_pixel_width - left_split_padding - right_split_padding).max(0.0);
 
             let mut render = LineRender {
                 term_window: self,
@@ -726,53 +758,69 @@ impl crate::TermWindow {
         let background_rect = euclid::rect(x, y, width, height);
 
         // Use the same padding as window padding for split lines
-        let horizontal_split_padding =
-            self.config
-                .window_padding
-                .left
-                .evaluate_as_pixels(DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.terminal_size.pixel_width as f32,
-                    pixel_cell: cell_width,
-                });
+        let horizontal_split_padding = self
+            .config
+            .window_padding
+            .left
+            .evaluate_as_pixels(DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.terminal_size.pixel_width as f32,
+                pixel_cell: cell_width,
+            })
+            .min(cell_width / 2.0);
 
-        let vertical_split_padding =
-            self.config
-                .window_padding
-                .top
-                .evaluate_as_pixels(DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.terminal_size.pixel_height as f32,
-                    pixel_cell: cell_height,
-                });
+        let vertical_split_padding = self
+            .config
+            .window_padding
+            .top
+            .evaluate_as_pixels(DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.terminal_size.pixel_height as f32,
+                pixel_cell: cell_height,
+            })
+            .min(cell_height / 2.0);
 
         // Add padding when there's a split line on the left
-        let left_split_padding = if pos.left > 0 {
+        let requested_left_split_padding = if pos.left > 0 {
             horizontal_split_padding
         } else {
             0.0
         };
 
         // Add padding when there's a split line on the right
-        let right_split_padding = if pos.left + pos.width < self.terminal_size.cols as usize {
-            horizontal_split_padding
-        } else {
-            0.0
-        };
+        let requested_right_split_padding =
+            if pos.left + pos.width < self.terminal_size.cols as usize {
+                horizontal_split_padding
+            } else {
+                0.0
+            };
+        let pane_pixel_width = pos.width as f32 * cell_width;
+        let (left_split_padding, right_split_padding) = Self::clamp_split_axis_padding(
+            pane_pixel_width,
+            requested_left_split_padding,
+            requested_right_split_padding,
+        );
 
         // Add padding when there's a split line on top
-        let top_split_padding = if pos.top > 0 {
+        let requested_top_split_padding = if pos.top > 0 {
             vertical_split_padding
         } else {
             0.0
         };
 
         // Add padding when there's a split line on bottom
-        let bottom_split_padding = if pos.top + pos.height < self.terminal_size.rows as usize {
-            vertical_split_padding
-        } else {
-            0.0
-        };
+        let requested_bottom_split_padding =
+            if pos.top + pos.height < self.terminal_size.rows as usize {
+                vertical_split_padding
+            } else {
+                0.0
+            };
+        let pane_pixel_height = pos.height as f32 * cell_height;
+        let (top_split_padding, bottom_split_padding) = Self::clamp_split_axis_padding(
+            pane_pixel_height,
+            requested_top_split_padding,
+            requested_bottom_split_padding,
+        );
 
         // Bounds for the terminal cells - with padding for split lines
         let content_rect = euclid::rect(
@@ -780,8 +828,8 @@ impl crate::TermWindow {
                 + (pos.left as f32 * cell_width)
                 + left_split_padding,
             top_pixel_y + (pos.top as f32 * cell_height) - (cell_height / 2.0) + top_split_padding,
-            (pos.width as f32 * cell_width) - left_split_padding - right_split_padding,
-            (pos.height as f32 * cell_height) - top_split_padding - bottom_split_padding,
+            (pane_pixel_width - left_split_padding - right_split_padding).max(0.0),
+            (pane_pixel_height - top_split_padding - bottom_split_padding).max(0.0),
         );
 
         let palette = pos.pane.palette();

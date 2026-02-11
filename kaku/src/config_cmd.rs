@@ -54,7 +54,9 @@ fn find_template_config() -> Option<PathBuf> {
         }
     }
 
-    candidates.push(PathBuf::from("/Applications/Kaku.app/Contents/Resources/kaku.lua"));
+    candidates.push(PathBuf::from(
+        "/Applications/Kaku.app/Contents/Resources/kaku.lua",
+    ));
     candidates.push(
         config::HOME_DIR
             .join("Applications")

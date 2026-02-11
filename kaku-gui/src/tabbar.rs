@@ -400,8 +400,14 @@ impl TabBarState {
         let titles_len: usize = tab_titles.iter().map(|s| s.len).sum();
         let number_of_tabs = tab_titles.len();
 
-        let available_cells =
-            title_width.saturating_sub(number_of_tabs.saturating_sub(1) + new_tab.len());
+        // Tab titles are rendered contiguously; only reserve width for controls
+        // that are actually shown.
+        let controls_width = if config.show_new_tab_button_in_tab_bar {
+            new_tab.len()
+        } else {
+            0
+        };
+        let available_cells = title_width.saturating_sub(controls_width);
         let tab_width_max = if config.use_fancy_tab_bar || available_cells >= titles_len {
             // We can render each title with its full width
             usize::max_value()

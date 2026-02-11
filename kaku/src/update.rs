@@ -26,8 +26,7 @@ mod imp {
     use std::cmp::Ordering;
     use std::fs;
     use std::io::Write;
-    use std::path::Component;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
 
