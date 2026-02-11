@@ -24,7 +24,7 @@ jobs:
 
       - name: Build Kaku
         run: |
-          ./scripts/build.sh
+          PROFILE=release-opt BUILD_ARCH=universal ./scripts/build.sh
 
       - name: Upload to Release
         uses: ncipollo/release-action@v1
