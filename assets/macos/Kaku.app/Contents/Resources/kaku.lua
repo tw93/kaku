@@ -143,7 +143,7 @@ end)
 config.font = wezterm.font_with_fallback({
   { family = 'JetBrains Mono', weight = 'Regular' },
   { family = 'PingFang SC', weight = 'Regular' },
-  { family = 'Apple Color Emoji', assume_emoji_presentation = true },
+  'Apple Color Emoji',
 })
 
 config.font_rules = {
@@ -165,13 +165,10 @@ config.harfbuzz_features = { 'calt=0', 'clig=0', 'liga=0' }
 config.use_cap_height_to_scale_fallback_fonts = false
 
 config.freetype_load_target = 'Normal'
--- config.freetype_render_target = 'HorizontalLcd'
 
-config.allow_square_glyphs_to_overflow_width = 'WhenFollowedBySpace'
-config.custom_block_glyphs = false
-
--- config.freetype_load_target = 'Normal'
--- config.freetype_render_target = 'HorizontalLcd'
+config.allow_square_glyphs_to_overflow_width = 'Always'
+config.custom_block_glyphs = true
+config.unicode_version = 14
 
 -- ===== Cursor =====
 config.default_cursor_style = 'BlinkingBar'

@@ -1805,7 +1805,7 @@ fn default_gui_startup_args() -> Vec<String> {
 
 // Coupled with term/src/config.rs:TerminalConfiguration::unicode_version
 fn default_unicode_version() -> u8 {
-    9
+    14
 }
 
 fn default_mux_env_remove() -> Vec<String> {
