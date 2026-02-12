@@ -297,6 +297,45 @@ impl super::TermWindow {
         if let Some(window) = mux.get_window(self.mux_window_id) {
             for tab in window.iter() {
                 tab.resize(size);
+
+                // Adjust each pane's terminal size to account for split padding.
+                // The GUI adds visual padding around split lines, but the terminal
+                // emulator must wrap text earlier to match the reduced visible area.
+                let cell_width = self.render_metrics.cell_size.width as f32;
+                let h_context = DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: size.pixel_width as f32,
+                    pixel_cell: cell_width,
+                };
+                let split_padding_px =
+                    self.config.window_padding.left.evaluate_as_pixels(h_context);
+                let padding_cols =
+                    (split_padding_px / cell_width).ceil() as usize;
+
+                if padding_cols > 0 {
+                    let total_cols = size.cols;
+                    for pos in tab.iter_panes() {
+                        let has_left_split = pos.left > 0;
+                        let has_right_split =
+                            pos.left + pos.width < total_cols;
+                        let cols_lost = if has_left_split { padding_cols } else { 0 }
+                            + if has_right_split { padding_cols } else { 0 };
+                        if cols_lost > 0 && pos.width > cols_lost {
+                            let new_cols = pos.width - cols_lost;
+                            let cell_w = self.render_metrics.cell_size.width as usize;
+                            pos.pane
+                                .resize(TerminalSize {
+                                    cols: new_cols,
+                                    rows: pos.height,
+                                    pixel_width: new_cols * cell_w,
+                                    pixel_height: pos.height
+                                        * self.render_metrics.cell_size.height as usize,
+                                    dpi: size.dpi,
+                                })
+                                .ok();
+                        }
+                    }
+                }
             }
         };
         self.resize_overlays();
