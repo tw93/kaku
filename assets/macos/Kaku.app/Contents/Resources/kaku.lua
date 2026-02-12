@@ -16,15 +16,6 @@ local function basename(path)
   return path:match('([^/]+)$')
 end
 
-local function equal_padding(all)
-  return {
-    left = all,
-    right = all,
-    top = '40px',
-    bottom = '30px',
-  }
-end
-
 local function padding_matches(current, expected)
   return current
     and current.left == expected.left
@@ -33,7 +24,12 @@ local function padding_matches(current, expected)
     and current.bottom == expected.bottom
 end
 
-local fullscreen_uniform_padding = equal_padding('40px')
+local fullscreen_uniform_padding = {
+  left = '40px',
+  right = '40px',
+  top = '70px',
+  bottom = '30px',
+}
 
 local function update_window_config(window, is_full_screen)
   local overrides = window:get_config_overrides() or {}
@@ -114,9 +110,13 @@ wezterm.on('format-tab-title', function(tab, _, _, _, _, max_width)
   }
 end)
 
-wezterm.on('update-right-status', function(window)
+wezterm.on('window-resized', function(window, pane)
   local dims = window:get_dimensions()
   update_window_config(window, dims.is_full_screen)
+end)
+
+wezterm.on('update-right-status', function(window)
+  local dims = window:get_dimensions()
   if not dims.is_full_screen then
     window:set_right_status('')
     return
