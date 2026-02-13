@@ -1119,10 +1119,11 @@ impl super::TermWindow {
                     _ => {}
                 };
 
+                let alt_screen = pane.is_alt_screen_active();
                 let mouse_mods = config::MouseEventTriggerMods {
                     mods: modifiers,
                     mouse_reporting,
-                    alt_screen: if pane.is_alt_screen_active() {
+                    alt_screen: if alt_screen {
                         MouseEventAltScreen::True
                     } else {
                         MouseEventAltScreen::False

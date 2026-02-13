@@ -2695,12 +2695,27 @@ impl TermWindow {
     }
 
     fn scroll_by_line(&mut self, amount: isize, pane: &Arc<dyn Pane>) -> anyhow::Result<()> {
+        let alt = pane.is_alt_screen_active();
+        let was_peeking = pane.is_primary_peek();
+
+        // Alt screen + 向上滚 → 进入 Primary Screen Peek
+        if alt && amount < 0 && !was_peeking {
+            pane.set_primary_peek(true);
+        }
+
         let dims = pane.get_dimensions();
         let position = self
             .get_viewport(pane.pane_id())
             .unwrap_or(dims.physical_top)
             .saturating_add(amount);
+
         self.set_viewport(pane.pane_id(), Some(position), dims);
+
+        // 滚到底部 → 退出 peek，回到 alt screen
+        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+            pane.set_primary_peek(false);
+        }
+
         if let Some(win) = self.window.as_ref() {
             win.invalidate();
         }
@@ -3543,6 +3558,7 @@ impl TermWindow {
 
     fn scroll_to_bottom(&mut self, pane: &Arc<dyn Pane>) {
         self.pane_state(pane.pane_id()).viewport = None;
+        pane.set_primary_peek(false);
     }
 
     fn get_active_pane_no_overlay(&self) -> Option<Arc<dyn Pane>> {
