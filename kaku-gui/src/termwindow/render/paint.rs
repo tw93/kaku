@@ -355,8 +355,8 @@ impl crate::TermWindow {
         // 顶部中间，紧贴 tab bar 下方
         let approx_width = 10.0 * metrics.cell_size.width as f32;
         let center_x = (dimensions.pixel_width as f32 - approx_width) / 2.0;
-        let top_y = border.top.get() as f32 + top_bar_height
-            + metrics.cell_size.height as f32 * 0.5;
+        let top_y =
+            border.top.get() as f32 + top_bar_height + metrics.cell_size.height as f32 * 0.5;
 
         let computed = self.compute_element(
             &LayoutContext {

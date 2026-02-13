@@ -308,12 +308,7 @@ impl crate::TermWindow {
             };
 
             let mut quad = self
-                .filled_rectangle(
-                    layers,
-                    0,
-                    euclid::rect(rx, ry, rw, rh),
-                    bg,
-                )
+                .filled_rectangle(layers, 0, euclid::rect(rx, ry, rw, rh), bg)
                 .context("filled_rectangle")?;
 
             quad.set_hsv(hsv);

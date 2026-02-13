@@ -3035,8 +3035,7 @@ impl TermWindow {
                         );
                         // 创建飞行动画（在 clear_selection 之前，用选区数据）
                         if let Some(mouse_evt) = self.current_mouse_event.as_ref() {
-                            let (tx, ty) =
-                                (mouse_evt.coords.x as f32, mouse_evt.coords.y as f32);
+                            let (tx, ty) = (mouse_evt.coords.x as f32, mouse_evt.coords.y as f32);
                             let sel = self.selection(pane.pane_id());
                             if let Some(range) = sel.range.clone() {
                                 let rectangular = sel.rectangular;

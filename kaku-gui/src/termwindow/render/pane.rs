@@ -368,42 +368,41 @@ impl crate::TermWindow {
             fly_info
         };
 
-        let (selrange, rectangular, selection_fade_alpha) = if let Some((_tx, _ty, progress)) =
-            fly_info
-        {
-            // 飞行动画期间：使用 copy_fly 的选区
-            let fly = self.copy_fly.as_ref().unwrap();
-            let alpha = 1.0 - progress * 0.7; // 1.0 → 0.3
-            (Some(fly.range.clone()), fly.rectangular, alpha)
-        } else {
-            // 清理已结束的飞行动画
-            if self
-                .copy_fly
-                .as_ref()
-                .map_or(false, |f| f.pane_id == pos.pane.pane_id())
-            {
-                self.copy_fly = None;
-            }
+        let (selrange, rectangular, selection_fade_alpha) =
+            if let Some((_tx, _ty, progress)) = fly_info {
+                // 飞行动画期间：使用 copy_fly 的选区
+                let fly = self.copy_fly.as_ref().unwrap();
+                let alpha = 1.0 - progress * 0.7; // 1.0 → 0.3
+                (Some(fly.range.clone()), fly.rectangular, alpha)
+            } else {
+                // 清理已结束的飞行动画
+                if self
+                    .copy_fly
+                    .as_ref()
+                    .map_or(false, |f| f.pane_id == pos.pane.pane_id())
+                {
+                    self.copy_fly = None;
+                }
 
-            if active_range.is_some() {
-                self.fading_selection = None;
-                (active_range, active_rect, 1.0f32)
-            } else if let Some(ref fade) = self.fading_selection {
-                if fade.pane_id == pos.pane.pane_id() {
-                    let elapsed = fade.started.elapsed().as_secs_f32();
-                    let alpha = (1.0 - elapsed / SELECTION_FADE_DURATION).max(0.0);
-                    if alpha > 0.0 {
-                        (Some(fade.range.clone()), fade.rectangular, alpha)
+                if active_range.is_some() {
+                    self.fading_selection = None;
+                    (active_range, active_rect, 1.0f32)
+                } else if let Some(ref fade) = self.fading_selection {
+                    if fade.pane_id == pos.pane.pane_id() {
+                        let elapsed = fade.started.elapsed().as_secs_f32();
+                        let alpha = (1.0 - elapsed / SELECTION_FADE_DURATION).max(0.0);
+                        if alpha > 0.0 {
+                            (Some(fade.range.clone()), fade.rectangular, alpha)
+                        } else {
+                            (None, false, 1.0)
+                        }
                     } else {
-                        (None, false, 1.0)
+                        (active_range, active_rect, 1.0)
                     }
                 } else {
                     (active_range, active_rect, 1.0)
                 }
-            } else {
-                (active_range, active_rect, 1.0)
-            }
-        };
+            };
         // 清理过期的淡出选区
         if let Some(ref fade) = self.fading_selection {
             if fade.started.elapsed().as_secs_f32() >= SELECTION_FADE_DURATION {
@@ -411,8 +410,8 @@ impl crate::TermWindow {
             }
         }
         // 动画期间持续重绘 (16ms ≈ 60fps)
-        let has_anim = fly_info.is_some()
-            || (selection_fade_alpha > 0.0 && selection_fade_alpha < 1.0);
+        let has_anim =
+            fly_info.is_some() || (selection_fade_alpha > 0.0 && selection_fade_alpha < 1.0);
         if has_anim {
             let next = Instant::now() + std::time::Duration::from_millis(16);
             let mut anim = self.has_animation.borrow_mut();
@@ -431,7 +430,10 @@ impl crate::TermWindow {
         } else {
             palette.selection_fg.to_linear()
         };
-        let selection_bg = palette.selection_bg.to_linear().mul_alpha(selection_fade_alpha);
+        let selection_bg = palette
+            .selection_bg
+            .to_linear()
+            .mul_alpha(selection_fade_alpha);
         let cursor_fg = palette.cursor_fg.to_linear();
         let cursor_bg = palette.cursor_bg.to_linear();
         let cursor_is_default_color =
