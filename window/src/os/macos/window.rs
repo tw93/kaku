@@ -1081,8 +1081,8 @@ impl WindowOps for Window {
     fn is_zoom_animation_active(&self) -> bool {
         unsafe {
             if let Some(view) = WindowView::get_this(&*self.ns_view) {
-                // Read zoom time directly from view (Cell<u64> doesn't require borrow)
-                let time_ms = view.last_zoom_time_ms.get();
+                // Read animation time directly from view (Cell<u64> doesn't require borrow)
+                let time_ms = view.last_resize_animation_time_ms.get();
                 if time_ms == 0 {
                     false
                 } else {
@@ -1469,7 +1469,7 @@ impl WindowInner {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    this.last_zoom_time_ms.set(now_ms);
+                    this.last_resize_animation_time_ms.set(now_ms);
                 }
                 NSWindow::zoom_(*self.window, nil);
             }
@@ -1485,7 +1485,7 @@ impl WindowInner {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    this.last_zoom_time_ms.set(now_ms);
+                    this.last_resize_animation_time_ms.set(now_ms);
                 }
                 NSWindow::zoom_(*self.window, nil);
             }
@@ -1493,6 +1493,15 @@ impl WindowInner {
     }
 
     fn toggle_fullscreen(&mut self) {
+        // Record animation start time to prevent font flickering during fullscreen transition
+        if let Some(this) = WindowView::get_this(unsafe { &**self.view }) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            this.last_resize_animation_time_ms.set(now_ms);
+        }
+
         let native_fullscreen = self.config.native_macos_fullscreen_mode;
 
         // If they changed their config since going full screen, be sure
@@ -2012,9 +2021,10 @@ const TITLEBAR_VIEW_NAME: &str = "NSTitlebarContainerView";
 
 struct WindowView {
     inner: Rc<RefCell<Inner>>,
-    /// Timestamp of last zoom operation to detect zoom animation (milliseconds since epoch, 0 = none)
-    /// Stored here instead of Inner to avoid RefCell borrow conflicts during rendering
-    last_zoom_time_ms: Cell<u64>,
+    /// Timestamp of last resize animation (zoom/fullscreen) to detect animation state
+    /// (milliseconds since epoch, 0 = none). Stored here instead of Inner to avoid
+    /// RefCell borrow conflicts during rendering.
+    last_resize_animation_time_ms: Cell<u64>,
 }
 
 pub fn superclass(this: &Object) -> &'static Class {
@@ -3195,7 +3205,7 @@ impl WindowView {
             // smooth font scaling updates as the window animates, preventing
             // the text from appearing too large/small during the transition.
             // Zoom animation typically takes ~0.2s, use 0.3s as buffer.
-            let time_ms = this.last_zoom_time_ms.get();
+            let time_ms = this.last_resize_animation_time_ms.get();
             let in_zoom_transition = if time_ms == 0 {
                 false
             } else {
@@ -3449,7 +3459,7 @@ impl WindowView {
 
         let view = Box::into_raw(Box::new(Self {
             inner: Rc::clone(&inner),
-            last_zoom_time_ms: Cell::new(0),
+            last_resize_animation_time_ms: Cell::new(0),
         }));
 
         unsafe {
