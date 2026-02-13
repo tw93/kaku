@@ -43,7 +43,7 @@ use raw_window_handle::{
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
 };
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{c_void, CStr};
 use std::path::PathBuf;
 use std::ptr::NonNull;
@@ -56,17 +56,10 @@ use wezterm_input_types::{is_ascii_control, IntegratedTitleButtonStyle, Keyboard
 
 static APP_TERMINATING: AtomicBool = AtomicBool::new(false);
 
-// Flag set by app-layer padding/tab-bar handler via request_drag_move().
-// mouse_down() checks this flag and calls performWindowDragWithEvent: synchronously,
-// matching the approach used by Ghostty for reliable drag + double-click coexistence.
-thread_local! {
-    static PENDING_DRAG_MOVE: Cell<bool> = Cell::new(false);
-}
-
 #[allow(non_upper_case_globals)]
 const NSViewLayerContentsPlacementTopLeft: NSInteger = 11;
 #[allow(non_upper_case_globals)]
-const NSViewLayerContentsRedrawBeforeViewResize: NSInteger = 3;
+const NSViewLayerContentsRedrawDuringViewResize: NSInteger = 2;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -751,7 +744,7 @@ impl Window {
             view.setWantsLayer(YES);
             let () = msg_send![
                 *view,
-                setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawBeforeViewResize
+                setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawDuringViewResize
             ];
 
             // register for drag and drop operations.
@@ -952,10 +945,10 @@ impl WindowOps for Window {
     }
 
     fn request_drag_move(&self) {
-        // Set flag for mouse_down() to call performWindowDragWithEvent: synchronously.
-        // The previous async path via spawn_into_main_thread caused the modal drag
-        // session to swallow the second mouseDown, preventing double-click detection.
-        PENDING_DRAG_MOVE.with(|f| f.set(true));
+        Connection::with_window_inner(self.id, |inner| {
+            inner.request_drag_move();
+            Ok(())
+        });
     }
 
     fn set_window_position(&self, coords: ScreenPoint) {
@@ -1424,6 +1417,16 @@ impl WindowInner {
 
     fn set_window_position(&self, coords: ScreenPoint) {
         set_window_position(*self.window, coords);
+    }
+
+    fn request_drag_move(&self) {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let event: id = msg_send![app, currentEvent];
+            if event != nil {
+                let () = msg_send![*self.window, performWindowDragWithEvent: event];
+            }
+        }
     }
 
     fn set_text_cursor_position(&mut self, cursor: Rect) {
@@ -2425,12 +2428,8 @@ impl WindowView {
         NO
     }
 
-    // Return NO so mouseDown: is always delivered to our view.
-    // With YES, macOS intercepts mouseDown for native window dragging,
-    // which prevents our double-click detection from ever running.
-    // We handle window dragging ourselves via performWindowDragWithEvent:.
     extern "C" fn mouse_down_can_move_window(_this: &Object, _sel: Sel) -> BOOL {
-        NO
+        YES
     }
 
     // Don't use Cocoa native window tabbing
@@ -2489,7 +2488,6 @@ impl WindowView {
         let mouse_buttons;
         let modifiers;
         let screen_coords;
-        let click_count;
         unsafe {
             let point = NSView::convertPoint_fromView_(view, nsevent.locationInWindow(), nil);
             let rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(point.x, point.y));
@@ -2503,7 +2501,6 @@ impl WindowView {
             mouse_buttons = decode_mouse_buttons(NSEvent::pressedMouseButtons(nsevent));
             modifiers = key_modifiers(nsevent.modifierFlags());
             screen_coords = NSEvent::mouseLocation(nsevent);
-            click_count = nsevent.clickCount().max(0) as u32;
         }
         let event = MouseEvent {
             kind,
@@ -2511,7 +2508,6 @@ impl WindowView {
             screen_coords: cartesian_to_screen_point(screen_coords),
             mouse_buttons,
             modifiers,
-            click_count,
         };
 
         if let Some(myself) = Self::get_this(this) {
@@ -2525,24 +2521,7 @@ impl WindowView {
     }
 
     extern "C" fn mouse_down(this: &mut Object, _sel: Sel, nsevent: id) {
-        PENDING_DRAG_MOVE.with(|f| f.set(false));
-
-        // Dispatch to app layer. For title/tab-bar clicks, the handler will either
-        // call request_drag_move() (single click) or zoom the window (double click).
         Self::mouse_common(this, nsevent, MouseEventKind::Press(MousePress::Left));
-
-        // If the app requested a drag, start it synchronously with the original event.
-        // This mirrors Ghostty's approach: performDrag runs its modal tracking loop
-        // here, ensuring the second mouseDown (double-click) is delivered afterwards.
-        if PENDING_DRAG_MOVE.with(|f| f.get()) {
-            PENDING_DRAG_MOVE.with(|f| f.set(false));
-            unsafe {
-                let window: id = msg_send![this as id, window];
-                if window != nil {
-                    let () = msg_send![window, performWindowDragWithEvent: nsevent];
-                }
-            }
-        }
     }
     extern "C" fn right_mouse_up(this: &mut Object, _sel: Sel, nsevent: id) {
         Self::mouse_common(this, nsevent, MouseEventKind::Release(MousePress::Right));

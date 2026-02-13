@@ -253,6 +253,9 @@ impl super::TermWindow {
                 ) {
                     return;
                 }
+                if event.coords.y < terminal_origin_y {
+                    return;
+                }
             }
         }
 
@@ -297,18 +300,6 @@ impl super::TermWindow {
                     let maximized = self
                         .window_state
                         .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
-                    // Double-click in title/padding area: toggle zoom
-                    if event.click_count == 2 {
-                        if let Some(ref window) = self.window {
-                            if maximized {
-                                window.restore();
-                            } else {
-                                window.maximize();
-                            }
-                        }
-                        return;
-                    }
-                    // Single click: start window drag
                     self.current_mouse_capture = Some(MouseCapture::UI);
                     self.is_window_dragging = true;
                     if !maximized && !cfg!(target_os = "macos") {
@@ -327,7 +318,8 @@ impl super::TermWindow {
         } else if matches!(
             self.current_mouse_capture,
             None | Some(MouseCapture::TerminalPane(_))
-        ) {
+        ) && event.coords.y >= terminal_origin_y
+        {
             self.mouse_event_terminal(
                 pane,
                 ClickPosition {
@@ -600,18 +592,20 @@ impl super::TermWindow {
                     let maximized = self
                         .window_state
                         .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
-                    // Double-click on empty tab bar area: toggle zoom
-                    if event.click_count == 2 {
-                        if let Some(ref window) = self.window {
-                            if maximized {
-                                window.restore();
-                            } else {
-                                window.maximize();
+                    if let Some(ref window) = self.window {
+                        if self.config.window_decorations
+                            == window::WindowDecorations::INTEGRATED_BUTTONS
+                                | window::WindowDecorations::RESIZE
+                        {
+                            if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
+                                if maximized {
+                                    window.restore();
+                                } else {
+                                    window.maximize();
+                                }
                             }
                         }
-                        return;
                     }
-                    // Single click: start window drag
                     self.is_window_dragging = true;
                     if !maximized && !cfg!(target_os = "macos") {
                         self.window_drag_position.replace(event.clone());
