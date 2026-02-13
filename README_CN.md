@@ -64,12 +64,9 @@ Kaku 内置了一套精选的 CLI 工具，预配置好即可投入使用：
 - **语法高亮**: 实时命令验证和着色。
 - **自动补全建议**: 基于历史记录的智能补全，类似 Fish shell。
 
-### 自定义
+Kaku 使用 `~/.config/kaku/kaku.lua` 进行配置，完全兼容 WezTerm 的 Lua API，内置默认配置位于 `Kaku.app/Contents/Resources/kaku.lua` 作为后备
 
-Kaku 通过标准 Lua 脚本完全可配置，100% 兼容 WezTerm 配置。配置文件按以下优先级加载：
-
-1. **内置配置**: `Kaku.app/Contents/Resources/kaku.lua` 处理默认设置。
-2. **用户覆盖**: 创建 `~/.config/kaku/kaku.lua` 并返回你的配置表。
+在终端中运行 `kaku` 即可查看所有可用命令，如 `kaku update`、`kaku reset` 和 `kaku config`
 
 ## 为什么做 Kaku？
 
