@@ -332,9 +332,12 @@ impl crate::TermWindow {
             1.0
         };
 
-        // Teal accent color for modern look
-        let bg_color = LinearRgba(0.0, 0.55, 0.55, 0.95 * alpha);
-        let text_color = LinearRgba(1.0, 1.0, 1.0, alpha);
+        // Use theme selection color for toast
+        let palette = self.palette();
+        let bg_linear = palette.selection_bg.to_linear();
+        let bg_color = LinearRgba(bg_linear.0, bg_linear.1, bg_linear.2, 0.9 * alpha);
+        let text_linear = palette.selection_fg.to_linear();
+        let text_color = LinearRgba(text_linear.0, text_linear.1, text_linear.2, alpha);
 
         let element = Element::new(&font, ElementContent::Text("Copied!".to_string()))
             .colors(ElementColors {
