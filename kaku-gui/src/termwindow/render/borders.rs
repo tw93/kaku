@@ -11,14 +11,10 @@ impl crate::TermWindow {
         let is_fullscreen = self
             .window_state
             .contains(::window::WindowState::FULL_SCREEN);
-        let border_dimensions = if is_fullscreen {
-            self.os_parameters
-                .as_ref()
-                .and_then(|p| p.border_dimensions.clone())
-                .unwrap_or_default()
-        } else {
-            self.get_os_border()
-        };
+        // Keep border geometry consistent with pane layout.
+        // In fullscreen we still need user window_frame border widths;
+        // OS border (eg: notch safe-area) is merged by get_os_border().
+        let border_dimensions = self.get_os_border();
         let fullscreen_border_color = border_dimensions.color;
 
         if border_dimensions.top.get() > 0
@@ -210,21 +206,11 @@ impl crate::TermWindow {
     }
 
     pub fn get_os_border(&self) -> window::parameters::Border {
-        if self
-            .window_state
-            .contains(::window::WindowState::FULL_SCREEN)
-        {
-            self.os_parameters
-                .as_ref()
-                .and_then(|p| p.border_dimensions.clone())
-                .unwrap_or_default()
-        } else {
-            Self::get_os_border_impl(
-                &self.os_parameters,
-                &self.config,
-                &self.dimensions,
-                &self.render_metrics,
-            )
-        }
+        Self::get_os_border_impl(
+            &self.os_parameters,
+            &self.config,
+            &self.dimensions,
+            &self.render_metrics,
+        )
     }
 }

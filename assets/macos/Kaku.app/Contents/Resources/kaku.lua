@@ -40,7 +40,7 @@ end
 local fullscreen_uniform_padding = {
   left = '40px',
   right = '40px',
-  top = '0px',
+  top = '70px',
   bottom = '30px',
 }
 
