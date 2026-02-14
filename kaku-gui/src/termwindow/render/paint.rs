@@ -332,9 +332,9 @@ impl crate::TermWindow {
             1.0
         };
 
-        // Use theme selection color for toast
+        // Use bright cyan (ansi index 14) for toast background
         let palette = self.palette();
-        let bg_linear = palette.selection_bg.to_linear();
+        let bg_linear = palette.colors.0[14].to_linear();
         let bg_color = LinearRgba(bg_linear.0, bg_linear.1, bg_linear.2, 0.9 * alpha);
         // Always use white text for visibility
         let text_color = LinearRgba(1.0, 1.0, 1.0, alpha);
@@ -354,23 +354,23 @@ impl crate::TermWindow {
             .border(BoxDimension::new(Dimension::Pixels(1.)))
             .border_corners(Some(Corners {
                 top_left: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
                     poly: TOP_LEFT_ROUNDED_CORNER,
                 },
                 top_right: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
                     poly: TOP_RIGHT_ROUNDED_CORNER,
                 },
                 bottom_left: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
                     poly: BOTTOM_LEFT_ROUNDED_CORNER,
                 },
                 bottom_right: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
                     poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                 },
             }));
@@ -381,7 +381,7 @@ impl crate::TermWindow {
         let toast_height = metrics.cell_size.height as f32 * 1.5;
         // Use consistent margin based on cell size
         let h_margin = metrics.cell_size.width as f32 * 2.0;
-        let v_margin = metrics.cell_size.height as f32 * 1.0;
+        let v_margin = metrics.cell_size.height as f32 * 1.5;
 
         // Calculate bottom bar height (tab bar or status bar at bottom)
         let bottom_bar_height = if self.show_tab_bar && self.config.tab_bar_at_bottom {
