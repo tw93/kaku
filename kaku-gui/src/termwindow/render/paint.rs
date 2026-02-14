@@ -332,7 +332,7 @@ impl crate::TermWindow {
             1.0
         };
 
-        let bg_color = LinearRgba(0.15, 0.15, 0.15, 0.85 * alpha);
+        let bg_color = LinearRgba(0.2, 0.2, 0.2, 0.9 * alpha);
         let text_color = LinearRgba(1.0, 1.0, 1.0, alpha);
 
         let element = Element::new(&font, ElementContent::Text("Copied!".to_string()))
@@ -373,15 +373,15 @@ impl crate::TermWindow {
 
         let dimensions = self.dimensions;
         let border = self.get_os_border();
-        let top_bar_height = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
-            self.tab_bar_pixel_height().unwrap_or(0.)
-        } else {
-            0.
-        };
         let approx_width = 10.0 * metrics.cell_size.width as f32;
-        let center_x = (dimensions.pixel_width as f32 - approx_width) / 2.0;
-        let top_y =
-            border.top.get() as f32 + top_bar_height + metrics.cell_size.height as f32 * 0.5;
+        let toast_height = metrics.cell_size.height as f32 * 1.5;
+        let margin = metrics.cell_size.width as f32;
+
+        // Position at bottom-right corner
+        let right_x =
+            dimensions.pixel_width as f32 - approx_width - margin - border.right.get() as f32;
+        let bottom_y =
+            dimensions.pixel_height as f32 - toast_height - margin - border.bottom.get() as f32;
 
         let computed = self.compute_element(
             &LayoutContext {
@@ -395,12 +395,7 @@ impl crate::TermWindow {
                     pixel_max: dimensions.pixel_width as f32,
                     pixel_cell: metrics.cell_size.width as f32,
                 },
-                bounds: euclid::rect(
-                    center_x,
-                    top_y,
-                    approx_width,
-                    metrics.cell_size.height as f32 * 2.0,
-                ),
+                bounds: euclid::rect(right_x, bottom_y, approx_width, toast_height),
                 metrics: &metrics,
                 gl_state: self.render_state.as_ref().unwrap(),
                 zindex: 120,
