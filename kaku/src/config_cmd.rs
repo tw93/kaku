@@ -60,6 +60,13 @@ local function resolve_bundled_config()
     return bundled
   end
 
+  local dev_bundled = wezterm.executable_dir .. '/../../assets/macos/Kaku.app/Contents/Resources/kaku.lua'
+  f = io.open(dev_bundled, 'r')
+  if f then
+    f:close()
+    return dev_bundled
+  end
+
   local app_bundled = '/Applications/Kaku.app/Contents/Resources/kaku.lua'
   f = io.open(app_bundled, 'r')
   if f then
@@ -73,13 +80,6 @@ local function resolve_bundled_config()
   if f then
     f:close()
     return home_bundled
-  end
-
-  local dev_bundled = wezterm.executable_dir .. '/../../assets/macos/Kaku.app/Contents/Resources/kaku.lua'
-  f = io.open(dev_bundled, 'r')
-  if f then
-    f:close()
-    return dev_bundled
   end
 
   return nil
