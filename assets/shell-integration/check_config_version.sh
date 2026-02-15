@@ -8,7 +8,7 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-CURRENT_CONFIG_VERSION=7
+CURRENT_CONFIG_VERSION=8
 VERSION_FILE="$HOME/.config/kaku/.kaku_config_version"
 
 detect_login_shell() {
@@ -64,7 +64,6 @@ if [[ $user_version -eq 0 || $user_version -ge $CURRENT_CONFIG_VERSION ]]; then
 	exit 0
 fi
 
-echo ""
 echo -e "${BOLD}Kaku config update available!${NC} v$user_version -> v$CURRENT_CONFIG_VERSION"
 echo ""
 
@@ -102,10 +101,15 @@ if [[ $user_version -lt 7 ]]; then
 	echo "  • Keep only one Kaku source line in .zshrc"
 	echo "  • Hide default cloud context segments in Starship prompt"
 fi
+if [[ $user_version -lt 8 ]]; then
+	echo "  • Preserve complete Zsh history persistence across sessions"
+	echo "  • Respect ZDOTDIR and existing HISTFILE/HISTSIZE defaults"
+	echo "  • Write history entries immediately with timestamps"
+fi
 echo ""
 
 read -p "Apply update? [Y/n] " -n 1 -r
-echo ""
+echo
 
 if [[ $REPLY =~ ^[Nn]$ ]]; then
 	mkdir -p "$(dirname "$VERSION_FILE")"
@@ -117,8 +121,6 @@ if [[ $REPLY =~ ^[Nn]$ ]]; then
 	exit 0
 fi
 
-echo ""
-
 # Apply updates
 if [[ -f "$RESOURCE_DIR/setup_zsh.sh" ]]; then
 	bash "$RESOURCE_DIR/setup_zsh.sh" --update-only
@@ -126,9 +128,8 @@ fi
 
 if ! command -v delta &>/dev/null; then
 	if [[ -f "$RESOURCE_DIR/install_delta.sh" ]]; then
-		echo ""
 		read -p "Install Delta for better git diffs? [Y/n] " -n 1 -r
-		echo ""
+		echo
 		if [[ ! $REPLY =~ ^[Nn]$ ]]; then
 			bash "$RESOURCE_DIR/install_delta.sh"
 		fi
@@ -139,10 +140,7 @@ mkdir -p "$(dirname "$VERSION_FILE")"
 echo "$CURRENT_CONFIG_VERSION" >"$VERSION_FILE"
 
 echo ""
-echo -e "${GREEN}${BOLD}Updated to v$CURRENT_CONFIG_VERSION!${NC}"
-echo ""
-echo "Press any key to start..."
-read -n 1 -s
+echo -e "\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"
 
 # Start a new shell instead of exiting
 TARGET_SHELL="$(detect_login_shell)"

@@ -585,9 +585,6 @@ pub struct TermWindow {
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
-    /// Set when the user explicitly invokes ReloadConfiguration.
-    /// The next config-reload callback consumes this flag and may show toast.
-    show_reload_toast_on_next_config_reload: bool,
 
     /// Toast notification: (start_time, message)
     toast: Option<(Instant, String)>,
@@ -923,7 +920,6 @@ impl TermWindow {
             key_table_state: KeyTableState::default(),
             modal: RefCell::new(None),
             opengl_info: None,
-            show_reload_toast_on_next_config_reload: false,
             toast: None,
             live_resizing: false,
         };
@@ -1883,34 +1879,38 @@ impl TermWindow {
             return;
         }
 
-        let show_toast = self.show_reload_toast_on_next_config_reload;
-        self.show_reload_toast_on_next_config_reload = false;
-        self.config_was_reloaded_impl(show_toast);
+        self.config_was_reloaded_impl();
     }
 
     fn config_was_reloaded_silently(&mut self) {
         if self.live_resizing {
             return;
         }
-        self.config_was_reloaded_impl(false);
+        self.config_was_reloaded_impl();
     }
 
-    fn config_was_reloaded_impl(&mut self, show_toast: bool) {
+    fn config_was_reloaded_impl(&mut self) {
         log::debug!(
             "config was reloaded, overrides: {:?}",
             self.config_overrides
         );
         self.key_table_state.clear_stack();
         self.connection_name = Connection::get().unwrap().name();
-        let config = match config::overridden_config(&self.config_overrides) {
-            Ok(config) => config,
-            Err(err) => {
-                log::error!(
-                    "Failed to apply config overrides to window: {:#}: {:?}",
-                    err,
-                    self.config_overrides
-                );
-                configuration()
+        let config = if matches!(&self.config_overrides, Value::Null)
+            || matches!(&self.config_overrides, Value::Object(obj) if obj.is_empty())
+        {
+            configuration()
+        } else {
+            match config::overridden_config(&self.config_overrides) {
+                Ok(config) => config,
+                Err(err) => {
+                    log::error!(
+                        "Failed to apply config overrides to window: {:#}: {:?}",
+                        err,
+                        self.config_overrides
+                    );
+                    configuration()
+                }
             }
         };
         self.config = config.clone();
@@ -2011,11 +2011,6 @@ impl TermWindow {
 
         self.invalidate_modal();
         self.emit_window_event("window-config-reloaded", None);
-
-        if show_toast {
-            // Show toast notification for explicit config reload.
-            self.show_toast("Config reloaded".to_string());
-        }
     }
 
     fn invalidate_modal(&mut self) {
@@ -2978,12 +2973,7 @@ impl TermWindow {
             CloseCurrentTab { confirm } => self.close_current_tab(*confirm),
             CloseCurrentPane { confirm } => self.close_current_pane(*confirm),
             Nop | DisableDefaultAssignment => {}
-            ReloadConfiguration => {
-                self.show_reload_toast_on_next_config_reload = true;
-                config::reload();
-                crate::frontend::refresh_fast_config_snapshot();
-                // Toast (if any) is decided in config_was_reloaded() callback.
-            }
+            ReloadConfiguration => {}
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,

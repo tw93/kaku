@@ -679,17 +679,9 @@ impl ConfigInner {
         // any paths that we should be watching
         let mut watch_paths = vec![];
         if let Some(path) = file_name {
-            // Let's also watch the parent directory for folks that do
-            // things with symlinks:
-            if let Some(parent) = path.parent() {
-                // But avoid watching the home dir itself, so that we
-                // don't keep reloading every time something in the
-                // home dir changes!
-                // <https://github.com/wezterm/wezterm/issues/1895>
-                if parent != &*HOME_DIR {
-                    watch_paths.push(parent.to_path_buf());
-                }
-            }
+            // Watch the config file itself to avoid unrelated changes in the
+            // config directory (for example runtime state files) from
+            // triggering reload loops.
             watch_paths.push(path);
         }
         if let Some(lua) = &lua {
@@ -743,14 +735,6 @@ impl ConfigInner {
         self.config = Arc::new(cfg);
         self.error.take();
         self.generation += 1;
-    }
-
-    fn overridden(&mut self, overrides: &wezterm_dynamic::Value) -> Result<ConfigHandle, Error> {
-        let config = Config::load_with_overrides(overrides);
-        Ok(ConfigHandle {
-            config: Arc::new(config.config?),
-            generation: self.generation,
-        })
     }
 
     fn use_test(&mut self) {
@@ -823,8 +807,16 @@ impl Configuration {
     }
 
     fn overridden(&self, overrides: &wezterm_dynamic::Value) -> Result<ConfigHandle, Error> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.overridden(overrides)
+        let generation = {
+            let inner = self.inner.lock().unwrap();
+            inner.generation
+        };
+
+        let config = Config::load_with_overrides(overrides);
+        Ok(ConfigHandle {
+            config: Arc::new(config.config?),
+            generation,
+        })
     }
 
     /// Use a config that doesn't depend on the user's

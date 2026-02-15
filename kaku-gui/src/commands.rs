@@ -467,21 +467,6 @@ impl CommandDef {
                         ));
                         menu.add_item(&settings_item);
 
-                        let reload_item = MenuItem::new_with(
-                            "Reload Configuration",
-                            Some(kaku_perform_key_assignment_sel),
-                            ".",
-                        );
-                        reload_item.set_key_equiv_modifier_mask(
-                            NSEventModifierFlags::NSCommandKeyMask
-                                | NSEventModifierFlags::NSShiftKeyMask,
-                        );
-                        reload_item.set_tool_tip("Reload configuration from kaku.lua");
-                        reload_item.set_represented_item(RepresentedItem::KeyAssignment(
-                            KeyAssignment::ReloadConfiguration,
-                        ));
-                        menu.add_item(&reload_item);
-
                         let set_default_terminal_item = MenuItem::new_with(
                             "Set as Default Terminal",
                             Some(kaku_perform_key_assignment_sel),
@@ -1316,12 +1301,13 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             }
         }
         ReloadConfiguration => CommandDef {
-            brief: "Reload configuration".into(),
-            doc: "Reloads the configuration file".into(),
-            keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), ".".into())],
+            brief: "Reload configuration (disabled)".into(),
+            doc: "Manual reload is disabled; configuration changes are reloaded automatically."
+                .into(),
+            keys: vec![],
             args: &[],
             menubar: &[],
-            icon: Some("md_reload"),
+            icon: None,
         },
         QuitApplication => CommandDef {
             brief: "Quit Kaku".into(),
@@ -2072,7 +2058,6 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
     // These are ordered by their position within the various menus
     return vec![
         // ----------------- Kaku
-        ReloadConfiguration,
         #[cfg(target_os = "macos")]
         HideApplication,
         #[cfg(target_os = "macos")]

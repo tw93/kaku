@@ -8,7 +8,7 @@ set -euo pipefail
 # when optional setup steps fail on user machines.
 persist_config_version() {
 	mkdir -p "$HOME/.config/kaku"
-	echo "7" >"$HOME/.config/kaku/.kaku_config_version"
+	echo "8" >"$HOME/.config/kaku/.kaku_config_version"
 }
 trap persist_config_version EXIT
 
@@ -210,7 +210,7 @@ if [[ "$INSTALL_DELTA" == "true" ]]; then
 	fi
 fi
 
-echo -e "\n\033[1;32m❤️ Kaku environment is ready! Enjoy coding.\033[0m"
+echo -e "\n\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"
 
 # `exec` replaces the shell process and skips EXIT trap handlers.
 # Persist explicitly here so successful first-run/upgrade paths are recorded.

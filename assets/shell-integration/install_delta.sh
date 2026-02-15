@@ -27,7 +27,6 @@ fi
 
 echo -e "${BOLD}Delta Installation${NC}"
 echo -e "${NC}Git diff beautifier for better code review${NC}"
-echo ""
 
 # Check if delta is already installed in Kaku user bin.
 # Even if already installed, still continue to apply git config defaults.
@@ -94,4 +93,3 @@ echo "    git show          # View commit details"
 echo "    git log -p        # View commit history with diffs"
 echo ""
 echo -e "${NC}  No need to learn new commands - delta just makes git better!${NC}"
-echo ""

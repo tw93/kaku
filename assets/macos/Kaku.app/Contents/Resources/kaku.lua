@@ -493,19 +493,6 @@ config.keys = {
     action = wezterm.action.HideApplication,
   },
 
-  -- Cmd+Shift+.: reload configuration
-  {
-    key = '.',
-    mods = 'CMD|SHIFT',
-    action = wezterm.action.ReloadConfiguration,
-  },
-  -- Some layouts report Shift+. as mapped:>, keep this as a fallback.
-  {
-    key = 'mapped:>',
-    mods = 'CMD',
-    action = wezterm.action.ReloadConfiguration,
-  },
-
   -- Cmd+Equal/Minus/0: adjust font size
   {
     key = '=',
@@ -738,7 +725,7 @@ config.swallow_mouse_click_on_window_focus = true
 -- ===== First Run Experience & Config Version Check =====
 wezterm.on('gui-startup', function(cmd)
   local home = os.getenv("HOME")
-  local current_version = 6  -- Update this when config changes
+  local current_version = 8  -- Update this when config changes
 
   -- Check for configuration version
   local version_file = home .. "/.config/kaku/.kaku_config_version"
@@ -783,20 +770,20 @@ wezterm.on('gui-startup', function(cmd)
   end
 
   if needs_update then
-    -- Re-run guided setup on version upgrades
+    -- Apply incremental config updates on version upgrades
     local resource_dir = wezterm.executable_dir:gsub("MacOS/?$", "Resources")
-    local first_run_script = resource_dir .. "/first_run.sh"
+    local update_script = resource_dir .. "/check_config_version.sh"
 
     -- Fallback for dev environment
-    local f_script = io.open(first_run_script, "r")
-    if not f_script then
-      first_run_script = wezterm.executable_dir .. "/../../assets/shell-integration/first_run.sh"
+    local u_script = io.open(update_script, "r")
+    if not u_script then
+      update_script = wezterm.executable_dir .. "/../../assets/shell-integration/check_config_version.sh"
     else
-      f_script:close()
+      u_script:close()
     end
 
     wezterm.mux.spawn_window {
-      args = { 'bash', first_run_script },
+      args = { 'bash', update_script },
       width = 106,
       height = 22,
     }
