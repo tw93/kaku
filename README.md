@@ -1,5 +1,3 @@
-<p align="right"><a href="README_CN.md">中文</a> | English</p>
-
 <div align="center">
   <h1>Kaku</h1>
   <p><em>A fast, out-of-the-box terminal built for AI coding.</em></p>
@@ -21,10 +19,10 @@
 
 ## Features
 
-- **Zero Config**: Polished defaults with JetBrains Mono, opencode theme, optimized macOS font rendering, smooth animations.
-- **Built-in Shell Suite**: Comes pre-loaded with Starship, z, Delta, syntax highlighting, autosuggestions, and autocompletions.
+- **Zero Config**: Defaults with JetBrains Mono, opencode theme, macOS font rendering, and low-res font sizing.
+- **Built-in Shell Suite**: Pre-loaded Starship, z, Delta, syntax highlighting, autocompletions, and zsh history.
 - **Fast & Lightweight**: 40% smaller binary, instant startup, lazy loading, stripped-down GPU-accelerated core.
-- **Lua Scripting**: Retains the full power of WezTerm's Lua engine for infinite customization.
+- **Lua + Native macOS**: Full WezTerm Lua API with Finder open, default-terminal handoff, and SSH host-aware tabs.
 
 ## Quick Start
 
