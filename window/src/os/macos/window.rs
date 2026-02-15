@@ -45,7 +45,7 @@ use raw_window_handle::{
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -53,7 +53,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use wezterm_font::FontConfiguration;
-use wezterm_input_types::{is_ascii_control, IntegratedTitleButtonStyle, KeyboardLedStatus};
+use wezterm_input_types::{IntegratedTitleButtonStyle, KeyboardLedStatus, is_ascii_control};
 
 static APP_TERMINATING: AtomicBool = AtomicBool::new(false);
 
@@ -67,6 +67,7 @@ const ZOOM_MAXIMIZE_HIDE_CONTENT_MS: u64 = 20;
 const ZOOM_RESTORE_HIDE_CONTENT_MS: u64 = 20;
 const NATIVE_EXIT_HIDE_CONTENT_MS: u64 = 50;
 const NATIVE_EXIT_POST_HIDE_CONTENT_MS: u64 = 20;
+const MOVE_PERSIST_DELAY_SECS: f64 = 0.35;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -454,12 +455,28 @@ struct PersistedWindowSize {
     height: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct PersistedWindowPosition {
+    x: isize,
+    y: isize,
+    #[serde(default)]
+    screen_id: Option<u32>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedState {
     #[serde(default)]
     config_version: Option<u64>,
     #[serde(default)]
     window_geometry: Option<PersistedWindowSize>,
+    #[serde(default)]
+    window_position: Option<PersistedWindowPosition>,
+}
+
+#[derive(Debug, Default)]
+struct PersistedRestore {
+    position: Option<ScreenPoint>,
+    skip_persisted_size: bool,
 }
 
 fn config_dir_file(name: &str) -> PathBuf {
@@ -526,6 +543,82 @@ fn window_size(window: *mut Object) -> PersistedWindowSize {
     }
 }
 
+fn restorable_window_position(pos: ScreenPoint) -> Option<ScreenPoint> {
+    unsafe {
+        let cart = screen_point_to_cartesian(pos);
+        let screens = NSScreen::screens(nil);
+        let count = screens.count();
+
+        for idx in 0..count {
+            let screen = screens.objectAtIndex(idx);
+            let frame: NSRect = msg_send![screen, visibleFrame];
+            let max_x = frame.origin.x + frame.size.width;
+            let max_y = frame.origin.y + frame.size.height;
+            if cart.x >= frame.origin.x
+                && cart.x <= max_x
+                && cart.y >= frame.origin.y
+                && cart.y <= max_y
+            {
+                return Some(pos);
+            }
+        }
+    }
+
+    None
+}
+
+fn screen_identifier_for_screen(screen: id) -> Option<u32> {
+    if screen.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let description: id = msg_send![screen, deviceDescription];
+        if description.is_null() {
+            return None;
+        }
+
+        let key = nsstring("NSScreenNumber");
+        let number: id = msg_send![description, objectForKey:*key];
+        if number.is_null() {
+            return None;
+        }
+
+        let value: u32 = msg_send![number, unsignedIntValue];
+        Some(value)
+    }
+}
+
+fn screen_identifier_for_window(window: *mut Object) -> Option<u32> {
+    if window.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let screen: id = msg_send![window, screen];
+        if screen.is_null() {
+            None
+        } else {
+            screen_identifier_for_screen(screen)
+        }
+    }
+}
+
+fn has_screen_identifier(screen_id: u32) -> bool {
+    unsafe {
+        let screens = NSScreen::screens(nil);
+        let count = screens.count();
+        for idx in 0..count {
+            let screen = screens.objectAtIndex(idx);
+            if screen_identifier_for_screen(screen) == Some(screen_id) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn parse_legacy_window_size(s: &str) -> Option<PersistedWindowSize> {
     let parts: Vec<_> = s.trim().split(',').map(str::trim).collect();
     match parts.as_slice() {
@@ -549,6 +642,7 @@ fn migrate_legacy_window_state() -> Option<PersistedState> {
     let state = PersistedState {
         config_version: None,
         window_geometry: Some(size),
+        window_position: None,
     };
 
     let state_file_name = state_file();
@@ -580,7 +674,31 @@ fn load_persisted_window_size() -> Option<PersistedWindowSize> {
     load_persisted_state()?.window_geometry
 }
 
-fn persist_window_size(window: *mut Object) -> bool {
+fn load_persisted_restore() -> PersistedRestore {
+    let mut restore = PersistedRestore::default();
+
+    let state = match load_persisted_state() {
+        Some(state) => state,
+        None => return restore,
+    };
+
+    if let Some(pos) = state.window_position {
+        if let Some(screen_id) = pos.screen_id {
+            if !has_screen_identifier(screen_id) {
+                // The previously used display is disconnected.
+                // Fall back to centered default startup behavior.
+                restore.skip_persisted_size = true;
+                return restore;
+            }
+        }
+
+        restore.position = restorable_window_position(ScreenPoint::new(pos.x, pos.y));
+    }
+
+    restore
+}
+
+fn persist_window_state(window: *mut Object, persist_position: bool) -> bool {
     if window.is_null() {
         return false;
     }
@@ -612,6 +730,14 @@ fn persist_window_size(window: *mut Object) -> bool {
 
     let mut state = load_persisted_state().unwrap_or_default();
     state.window_geometry = Some(size);
+    if persist_position {
+        let screen_id = screen_identifier_for_window(window);
+        state.window_position = window_position(window).map(|pos| PersistedWindowPosition {
+            x: pos.x,
+            y: pos.y,
+            screen_id,
+        });
+    }
 
     let encoded = match serde_json::to_string_pretty(&state) {
         Ok(value) => value,
@@ -621,8 +747,12 @@ fn persist_window_size(window: *mut Object) -> bool {
     std::fs::write(&file_name, format!("{}\n", encoded)).is_ok()
 }
 
+fn persist_window_size_and_position(window: *mut Object) -> bool {
+    persist_window_state(window, true)
+}
+
 /// Called from the app delegate when the user confirms quit.
-/// Persists size from tracked terminal windows before the event loop stops.
+/// Persists size and position from tracked terminal windows before the event loop stops.
 pub(crate) fn on_app_terminating() {
     APP_TERMINATING.store(true, Ordering::Relaxed);
     if let Some(conn) = Connection::get() {
@@ -634,26 +764,32 @@ pub(crate) fn on_app_terminating() {
             }
         }
 
-        let preferred = windows.iter().copied().find(|window| unsafe {
+        let key_window = windows.iter().copied().find(|window| unsafe {
             let is_key: BOOL = msg_send![*window, isKeyWindow];
             is_key != NO
         });
-        let preferred = preferred.or_else(|| {
-            windows.iter().copied().find(|window| unsafe {
-                let is_main: BOOL = msg_send![*window, isMainWindow];
-                is_main != NO
-            })
-        });
-        let preferred = preferred.or_else(|| {
-            if windows.len() == 1 {
-                windows.first().copied()
-            } else {
-                None
-            }
+        let main_window = windows.iter().copied().find(|window| unsafe {
+            let is_main: BOOL = msg_send![*window, isMainWindow];
+            is_main != NO
         });
 
-        if let Some(window) = preferred {
-            if persist_window_size(window) {
+        let mut candidates = vec![];
+        if let Some(window) = key_window {
+            candidates.push(window);
+        }
+        if let Some(window) = main_window {
+            if !candidates.iter().any(|candidate| *candidate == window) {
+                candidates.push(window);
+            }
+        }
+        for window in windows {
+            if !candidates.iter().any(|candidate| *candidate == window) {
+                candidates.push(window);
+            }
+        }
+
+        for window in candidates {
+            if persist_window_size_and_position(window) {
                 return;
             }
         }
@@ -701,7 +837,15 @@ impl Window {
         } else {
             None
         };
-        if explicit_initial_pos.is_none() && is_first_window {
+        let persisted_restore = if explicit_initial_pos.is_none()
+            && is_first_window
+            && remembered_initial_pos.is_none()
+        {
+            load_persisted_restore()
+        } else {
+            PersistedRestore::default()
+        };
+        if explicit_initial_pos.is_none() && is_first_window && !persisted_restore.skip_persisted_size {
             if let Some(size) = load_persisted_window_size() {
                 if size.width >= MIN_RESTORE_WIDTH && size.height >= MIN_RESTORE_HEIGHT {
                     width = size.width;
@@ -788,6 +932,9 @@ impl Window {
             } else if let Some(pos) = remembered_initial_pos {
                 // Re-open after closing last window (Cmd+W) should preserve
                 // recent position without adding cold-start file I/O.
+                set_window_position(*window, pos);
+            } else if let Some(pos) = persisted_restore.position {
+                // Cold start: restore persisted position when it is still visible.
                 set_window_position(*window, pos);
             } else {
                 // No position memory/cascade: keep startup deterministic.
@@ -2553,11 +2700,7 @@ impl WindowView {
     extern "C" fn has_marked_text(this: &mut Object, _sel: Sel) -> BOOL {
         if let Some(myself) = Self::get_this(this) {
             let inner = myself.inner.borrow();
-            if inner.ime_text.is_empty() {
-                NO
-            } else {
-                YES
-            }
+            if inner.ime_text.is_empty() { NO } else { YES }
         } else {
             NO
         }
@@ -2906,6 +3049,14 @@ impl WindowView {
     }
 
     extern "C" fn window_will_close(this: &mut Object, _sel: Sel, _id: id) {
+        unsafe {
+            let _: () = msg_send![
+                class!(NSObject),
+                cancelPreviousPerformRequestsWithTarget: this as *mut Object
+                selector: sel!(kakuPersistWindowStateAfterMove:)
+                object: nil
+            ];
+        }
         if let Some(this) = Self::get_this(this) {
             let conn = Connection::get().unwrap();
             if !APP_TERMINATING.load(Ordering::Relaxed) {
@@ -2913,7 +3064,7 @@ impl WindowView {
                     let window = window.load();
                     if !window.is_null() {
                         remember_last_closed_window_position(*window);
-                        let _ = persist_window_size(*window);
+                        let _ = persist_window_size_and_position(*window);
                     }
                 }
             }
@@ -2925,6 +3076,38 @@ impl WindowView {
             this.update_application_presentation(false);
             let window_id = this.inner.borrow_mut().window_id;
             conn.windows.borrow_mut().remove(&window_id);
+        }
+    }
+
+    extern "C" fn did_move(this: &mut Object, _sel: Sel, _notification: id) {
+        unsafe {
+            let _: () = msg_send![
+                class!(NSObject),
+                cancelPreviousPerformRequestsWithTarget: this as *mut Object
+                selector: sel!(kakuPersistWindowStateAfterMove:)
+                object: nil
+            ];
+            let _: () = msg_send![
+                this,
+                performSelector: sel!(kakuPersistWindowStateAfterMove:)
+                withObject: nil
+                afterDelay: MOVE_PERSIST_DELAY_SECS
+            ];
+        }
+    }
+
+    extern "C" fn persist_window_state_after_move(this: &mut Object, _sel: Sel, _obj: id) {
+        if APP_TERMINATING.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if let Some(this) = Self::get_this(this) {
+            if let Some(window) = this.inner.borrow().window.as_ref() {
+                let window = window.load();
+                if !window.is_null() {
+                    let _ = persist_window_size_and_position(*window);
+                }
+            }
         }
     }
 
@@ -3685,7 +3868,7 @@ impl WindowView {
 
             if let Some(window) = window_to_persist {
                 if !window.is_null() {
-                    let _ = persist_window_size(*window);
+                    let _ = persist_window_size_and_position(*window);
                 }
             }
         }
@@ -3878,7 +4061,7 @@ impl WindowView {
         }
         if let Some(window) = window_to_persist {
             if !window.is_null() {
-                let _ = persist_window_size(*window);
+                let _ = persist_window_size_and_position(*window);
             }
         }
     }
@@ -4205,8 +4388,16 @@ impl WindowView {
                 Self::did_resize as extern "C" fn(&mut Object, Sel, id),
             );
             cls.add_method(
+                sel!(windowDidMove:),
+                Self::did_move as extern "C" fn(&mut Object, Sel, id),
+            );
+            cls.add_method(
                 sel!(windowDidChangeScreen:),
                 Self::did_change_screen as extern "C" fn(&mut Object, Sel, id),
+            );
+            cls.add_method(
+                sel!(kakuPersistWindowStateAfterMove:),
+                Self::persist_window_state_after_move as extern "C" fn(&mut Object, Sel, id),
             );
 
             cls.add_method(
