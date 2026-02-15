@@ -50,7 +50,12 @@ local resize_state_by_window = setmetatable({}, { __mode = 'k' })
 
 local function monotonic_now()
   -- Keep this numeric for debounce arithmetic.
-  return os.clock()
+  -- Some runtime environments expose os.clock() as a non-number value.
+  local ok, value = pcall(os.clock)
+  if ok and type(value) == 'number' then
+    return value
+  end
+  return os.time()
 end
 
 local function dims_hash(dims)
@@ -252,7 +257,7 @@ end
 
 config.font_size = get_font_size()
 config.line_height = 1.28
-config.cell_width = 0.94
+config.cell_width = 1.0
 config.harfbuzz_features = { 'calt=0', 'clig=0', 'liga=0' }
 config.use_cap_height_to_scale_fallback_fonts = false
 
