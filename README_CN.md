@@ -53,6 +53,7 @@ Kaku 提供直觉化的 macOS 原生快捷键：
 | 智能跳转 | `z <目录>` |
 | 智能选择 | `z -l <目录>` |
 | 最近目录 | `z -t` |
+| 功能选择菜单 | 在对应 Pane 点击鼠标右键（包括切换编码、配置重载等） |
 
 ## 配置
 
@@ -63,6 +64,7 @@ Kaku 内置了一套精选的 CLI 工具，预配置好即可投入使用：
 - **Delta**: 带语法高亮的 git、diff 和 grep 输出分页器。
 - **语法高亮**: 实时命令验证和着色。
 - **自动补全建议**: 基于历史记录的智能补全，类似 Fish shell。
+- **集成CJK编码实时切换**: 支持针对独立 Pane 设置切换常见CJK编码，同时支持本地shell和远程ssh shell。
 
 Kaku 使用 `~/.config/kaku/kaku.lua` 进行配置，完全兼容 WezTerm 的 Lua API，内置默认配置位于 `Kaku.app/Contents/Resources/kaku.lua` 作为后备
 
@@ -98,6 +100,10 @@ WezTerm 强大且可扩展，我非常感谢它的引擎。但我想要一个开
 2. **有 Windows 或 Linux 版本吗？**
 
    暂时没有，Kaku 目前仅支持 macOS，我们会先专注于完善 Mac 上体验，等成熟后可能会推出 Windows 版本给大伙
+
+3. **Kaku 支持 macOS 透明窗口吗？**
+
+   支持。你可以在 `~/.config/kaku/kaku.lua` 里配置 `window_background_opacity`，并按需设置 `macos_window_background_blur`。透明模式下顶部、右侧和底部留白区域会保持一致，避免出现透明空洞。
 
 ## 支持
 
