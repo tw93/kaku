@@ -202,33 +202,60 @@ wezterm.on('update-right-status', function(window)
 end)
 
 -- ===== Font =====
+-- macOS 系统默认中文字体（PingFang SC 苹方），让系统自动选择最佳
 config.font = wezterm.font_with_fallback({
   { family = 'JetBrains Mono', weight = 'Regular' },
-  { family = 'PingFang SC', weight = 'Regular' },
+  -- 不指定中文字体，使用 macOS 系统默认（根据语言设置自动选择）
   'Apple Color Emoji',
 })
 
 config.font_rules = {
+  -- 禁止细体：Half 强度使用 Regular 而不是 Light
+  {
+    intensity = 'Half',
+    font = wezterm.font_with_fallback({
+      { family = 'JetBrains Mono', weight = 'Regular' },
+    }),
+  },
+  -- Normal 斜体
   {
     intensity = 'Normal',
     italic = true,
     font = wezterm.font_with_fallback({
       { family = 'JetBrains Mono', weight = 'Regular', italic = false },
-      { family = 'PingFang SC', weight = 'Regular' },
+    }),
+  },
+  -- Bold 使用 Medium 而不是 Heavy
+  {
+    intensity = 'Bold',
+    font = wezterm.font_with_fallback({
+      { family = 'JetBrains Mono', weight = 'Medium' },
     }),
   },
 }
 
 config.bold_brightens_ansi_colors = false
-config.font_size = 17.0
-config.line_height = 1.30
-config.cell_width = 1.00
+-- 根据屏幕 DPI 自动调整字体大小
+-- Retina 屏 (>=150 DPI): 17px，低分辨率屏 (<150 DPI): 15px
+local function get_font_size()
+  local success, screens = pcall(function()
+    return wezterm.gui.screens()
+  end)
+  if success and screens and screens.main then
+    local dpi = screens.main.effective_dpi or 72
+    if dpi < 150 then
+      return 15.0  -- 低分辨率外接显示器
+    end
+  end
+  return 17.0  -- Retina 屏幕默认
+end
+
+config.font_size = get_font_size()
+config.line_height = 1.28
+config.cell_width = 0.94
 config.harfbuzz_features = { 'calt=0', 'clig=0', 'liga=0' }
 config.use_cap_height_to_scale_fallback_fonts = false
 
-config.freetype_load_target = 'Normal'
-
-config.allow_square_glyphs_to_overflow_width = 'Always'
 config.custom_block_glyphs = true
 config.unicode_version = 14
 
