@@ -3141,7 +3141,10 @@ impl TermWindow {
             ShowLauncherArgs(args) => {
                 debug_mouse_menu_log(
                     self.mux_window_id,
-                    format!("perform_key_assignment ShowLauncherArgs flags={:?}", args.flags),
+                    format!(
+                        "perform_key_assignment ShowLauncherArgs flags={:?}",
+                        args.flags
+                    ),
                 );
                 let title = args.title.clone().unwrap_or("Launcher".to_string());
                 let args = LauncherActionArgs {
@@ -4034,7 +4037,10 @@ impl TermWindow {
         self.cancel_overlay_for_pane(pane_id);
         debug_mouse_menu_log(
             self.mux_window_id,
-            format!("assign_overlay_for_pane pane_id={pane_id} overlay_pane_id={}", pane.pane_id()),
+            format!(
+                "assign_overlay_for_pane pane_id={pane_id} overlay_pane_id={}",
+                pane.pane_id()
+            ),
         );
         self.pane_state(pane_id).overlay.replace(OverlayState {
             pane,
