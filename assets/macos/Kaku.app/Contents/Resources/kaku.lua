@@ -207,22 +207,22 @@ wezterm.on('update-right-status', function(window)
 end)
 
 -- ===== Font =====
--- macOS 系统默认中文字体（PingFang SC 苹方），让系统自动选择最佳
+-- System default CJK font (PingFang SC on macOS); let the system pick the best match.
 config.font = wezterm.font_with_fallback({
   { family = 'JetBrains Mono', weight = 'Regular' },
-  -- 不指定中文字体，使用 macOS 系统默认（根据语言设置自动选择）
+  -- Omit explicit CJK font; macOS selects the best one based on locale.
   'Apple Color Emoji',
 })
 
 config.font_rules = {
-  -- 禁止细体：Half 强度使用 Regular 而不是 Light
+  -- Prevent thin weight: use Regular instead of Light for Half intensity
   {
     intensity = 'Half',
     font = wezterm.font_with_fallback({
       { family = 'JetBrains Mono', weight = 'Regular' },
     }),
   },
-  -- Normal 斜体
+  -- Normal italic: disable real italics (keep upright)
   {
     intensity = 'Normal',
     italic = true,
@@ -230,7 +230,7 @@ config.font_rules = {
       { family = 'JetBrains Mono', weight = 'Regular', italic = false },
     }),
   },
-  -- Bold 使用 Medium 而不是 Heavy
+  -- Bold: use Medium weight instead of Heavy
   {
     intensity = 'Bold',
     font = wezterm.font_with_fallback({
@@ -240,8 +240,8 @@ config.font_rules = {
 }
 
 config.bold_brightens_ansi_colors = false
--- 根据屏幕 DPI 自动调整字体大小
--- Retina 屏 (>=150 DPI): 17px，低分辨率屏 (<150 DPI): 15px
+-- Auto-adjust font size based on screen DPI.
+-- Retina (>=150 DPI): 17px, low-resolution external displays (<150 DPI): 15px.
 local function get_font_size()
   local success, screens = pcall(function()
     return wezterm.gui.screens()
@@ -249,10 +249,10 @@ local function get_font_size()
   if success and screens and screens.main then
     local dpi = screens.main.effective_dpi or 72
     if dpi < 150 then
-      return 15.0  -- 低分辨率外接显示器
+      return 15.0  -- Low-resolution external display
     end
   end
-  return 17.0  -- Retina 屏幕默认
+  return 17.0  -- Retina default
 end
 
 config.font_size = get_font_size()
@@ -273,6 +273,9 @@ end
 config.default_cursor_style = 'BlinkingBar'
 config.cursor_thickness = '2px'
 config.cursor_blink_rate = 500
+-- Sharp on/off blink without fade animation (like a standard terminal).
+config.cursor_blink_ease_in = 'Constant'
+config.cursor_blink_ease_out = 'Constant'
 
 -- ===== Scrollback =====
 config.scrollback_lines = 10000
@@ -760,7 +763,15 @@ wezterm.on('gui-startup', function(cmd)
       if encoded then
         wf:write(encoded .. "\n")
       else
-        wf:write(string.format("{\n  \"config_version\": %d\n}\n", version))
+        -- Manual JSON fallback when json_encode is unavailable.
+        -- Include geometry if present so state is not lost.
+        if geometry and geometry.width and geometry.height then
+          wf:write(string.format(
+            '{\n  "config_version": %d,\n  "window_geometry": {\n    "width": %d,\n    "height": %d\n  }\n}\n',
+            version, geometry.width, geometry.height))
+        else
+          wf:write(string.format('{\n  "config_version": %d\n}\n', version))
+        end
       end
       wf:close()
     end
