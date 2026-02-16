@@ -41,6 +41,7 @@ Kaku comes with intuitive macOS-native shortcuts:
 | New Window | `Cmd + N` |
 | Split Pane Vertical | `Cmd + D` |
 | Split Pane Horizontal | `Cmd + Shift + D` |
+| Toggle Split Direction | `Cmd + Shift + S` |
 | Zoom/Unzoom Pane | `Cmd + Shift + Enter` |
 | Resize Pane | `Cmd + Ctrl + Arrows` |
 | Close Tab/Pane | `Cmd + W` |
