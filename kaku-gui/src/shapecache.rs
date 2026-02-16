@@ -603,8 +603,8 @@ mod test {
         glyph_idx: 58,
         num_cells: 1,
         x_offset: 0.0,
-        bearing_x: -0.8333333,
-        bitmap_pixel_width: 12,
+        bearing_x: -1.0,
+        bitmap_pixel_width: 15,
     },
 ]
 "
@@ -666,14 +666,14 @@ mod test {
         num_cells: 1,
         x_offset: 0.0,
         bearing_x: 1.0,
-        bitmap_pixel_width: 7,
+        bitmap_pixel_width: 8,
     },
     GlyphPosition {
         glyph_idx: 0,
         num_cells: 1,
         x_offset: 0.0,
         bearing_x: 1.0,
-        bitmap_pixel_width: 7,
+        bitmap_pixel_width: 8,
     },
     GlyphPosition {
         glyph_idx: 958,
@@ -687,7 +687,7 @@ mod test {
         num_cells: 0,
         x_offset: 0.0,
         bearing_x: 1.0,
-        bitmap_pixel_width: 7,
+        bitmap_pixel_width: 8,
     },
     GlyphPosition {
         glyph_idx: 958,
@@ -717,7 +717,7 @@ mod test {
         num_cells: 2,
         x_offset: 0.0,
         bearing_x: 1.0,
-        bitmap_pixel_width: 7,
+        bitmap_pixel_width: 8,
     },
     GlyphPosition {
         glyph_idx: 958,

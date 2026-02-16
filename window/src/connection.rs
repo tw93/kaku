@@ -23,6 +23,8 @@ pub fn shutdown() {
 pub enum ApplicationEvent {
     /// The system wants to open a command in the terminal
     OpenCommandScript(String),
+    /// The system wants to open a command in a new tab when possible
+    OpenCommandScriptInTab(String),
     PerformKeyAssignment(KeyAssignment),
 }
 
@@ -81,6 +83,16 @@ pub trait ConnectionOps {
     fn confirm(&self, _title: &str, _message: &str, _action_label: &str) -> bool {
         false
     }
+
+    /// Set this app as the system default terminal handler.
+    fn set_default_terminal(&self) -> Fallible<()> {
+        Err(anyhow::anyhow!(
+            "setting default terminal is not supported on this platform"
+        ))
+    }
+
+    /// Replay any queued platform service events once app event handlers are ready.
+    fn flush_pending_service_events(&self) {}
 
     /// Perform the system beep/notification sound
     fn beep(&self) {}

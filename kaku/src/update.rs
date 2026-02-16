@@ -25,7 +25,7 @@ mod imp {
     use serde::Deserialize;
     use std::cmp::Ordering;
     use std::fs;
-    use std::io::Write;
+    use std::io::{self, IsTerminal, Write};
     use std::path::{Component, Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -191,13 +191,19 @@ mod imp {
         let helper_script = update_root.join(format!("apply-update-{}.sh", now));
         write_helper_script(&helper_script).context("write update helper script")?;
 
-        spawn_update_helper(&helper_script, &target_app, &new_app_path, &work_dir)
-            .context("spawn update helper")?;
-
         let update_label = release
             .as_ref()
             .map(|r| r.tag_name.as_str())
             .unwrap_or("latest");
+        if !confirm_apply_update(update_label)? {
+            println!("Update cancelled.");
+            let _ = fs::remove_dir_all(&work_dir);
+            return Ok(());
+        }
+
+        spawn_update_helper(&helper_script, &target_app, &new_app_path, &work_dir)
+            .context("spawn update helper")?;
+
         println!(
             "Update to {} has started in background.",
             format_version_for_display(update_label)
@@ -223,19 +229,23 @@ mod imp {
             };
         }
 
-        if let Some(brew_info) = resolve_brew_info()? {
-            return Ok(UpdateProvider::Brew(brew_info));
-        }
-
         let exe = std::env::current_exe().context("resolve current executable path")?;
+        let mut should_probe_brew = path_is_or_points_to_caskroom(&exe);
+
         if let Some(target) = std::env::var_os("KAKU_UPDATE_TARGET_APP") {
             let target = PathBuf::from(target);
-            if path_contains_caskroom(&exe) || path_contains_caskroom(&target) {
-                if find_brew_binary().is_none() {
-                    bail!(
-                        "Kaku appears to be Homebrew-managed but `brew` was not found in PATH or standard locations"
-                    );
-                }
+            should_probe_brew |= path_is_or_points_to_caskroom(&target);
+        }
+
+        if should_probe_brew {
+            if let Some(brew_info) = resolve_brew_info()? {
+                return Ok(UpdateProvider::Brew(brew_info));
+            }
+
+            if find_brew_binary().is_none() {
+                bail!(
+                    "Kaku appears to be Homebrew-managed but `brew` was not found in PATH or standard locations"
+                );
             }
         }
 
@@ -293,6 +303,13 @@ mod imp {
             Component::Normal(name) => name == "Caskroom",
             _ => false,
         })
+    }
+
+    fn path_is_or_points_to_caskroom(path: &Path) -> bool {
+        path_contains_caskroom(path)
+            || fs::canonicalize(path)
+                .map(|resolved| path_contains_caskroom(&resolved))
+                .unwrap_or(false)
     }
 
     fn is_brew_cask_installed(brew_bin: &Path, cask_name: &str) -> anyhow::Result<bool> {
@@ -648,6 +665,7 @@ rollback() {
 }
 
 log "start apply update"
+/usr/bin/osascript -e 'display notification "Kaku is applying an update and will relaunch automatically." with title "Kaku Update"' >/dev/null 2>&1 || true
 
 for _ in $(seq 1 20); do
   if /usr/bin/pgrep -f "$TARGET_GUI" >/dev/null 2>&1 || /usr/bin/pgrep -f "$TARGET_CLI" >/dev/null 2>&1; then
@@ -701,6 +719,33 @@ log "done"
             "chmod update helper script",
         )?;
         Ok(())
+    }
+
+    fn confirm_apply_update(update_label: &str) -> anyhow::Result<bool> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            return Ok(true);
+        }
+
+        println!();
+        println!(
+            "Ready to apply update {}.",
+            format_version_for_display(update_label)
+        );
+        print!("Kaku will quit and relaunch automatically. Continue? [Y/n] ");
+        io::stdout()
+            .flush()
+            .context("flush stdout for update confirmation")?;
+
+        let mut input = String::new();
+        let bytes_read = io::stdin()
+            .read_line(&mut input)
+            .context("read update confirmation")?;
+        if bytes_read == 0 {
+            return Ok(false);
+        }
+        let answer = input.trim().to_ascii_lowercase();
+
+        Ok(answer.is_empty() || answer == "y" || answer == "yes")
     }
 
     fn spawn_update_helper(

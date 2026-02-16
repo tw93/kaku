@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use wezterm_term::{Alert, ClipboardSelection};
 use wezterm_toast_notification::*;
 
+pub const SET_DEFAULT_TERMINAL_EVENT: &str = "set-default-terminal";
+
 pub struct GuiFrontEnd {
     connection: Rc<Connection>,
     switching_workspaces: RefCell<bool>,
@@ -116,10 +118,51 @@ pub fn open_kaku_config() {
     });
 }
 
+pub fn set_default_terminal_with_feedback() {
+    fn show_window_toast(message: &str) -> bool {
+        let windows = front_end().gui_windows();
+        if windows.is_empty() {
+            return false;
+        }
+
+        for gui in windows {
+            let text = message.to_string();
+            gui.window
+                .notify(TermWindowNotif::Apply(Box::new(move |tw| {
+                    tw.show_toast(text);
+                })));
+        }
+
+        true
+    }
+
+    match Connection::get() {
+        Some(conn) => match conn.set_default_terminal() {
+            Ok(()) => {
+                let message = "Kaku is now the default terminal";
+                if !show_window_toast(message) {
+                    conn.alert("Default Terminal", message);
+                }
+            }
+            Err(err) => {
+                let message = format!("Failed to set Kaku as default terminal: {err:#}");
+                log::error!("{message}");
+                if !show_window_toast("Failed to set default terminal") {
+                    conn.alert("Default Terminal", &message);
+                }
+            }
+        },
+        None => {
+            log::error!("Cannot set default terminal because no GUI connection is available");
+        }
+    }
+}
+
 impl GuiFrontEnd {
     pub fn try_new() -> anyhow::Result<Rc<GuiFrontEnd>> {
         let connection = Connection::init()?;
         connection.set_event_handler(Self::app_event_handler);
+        connection.flush_pending_service_events();
 
         let mux = Mux::get();
         let client_id = mux.active_identity().expect("to have set my own id");
@@ -310,76 +353,86 @@ impl GuiFrontEnd {
         Ok(front_end)
     }
 
+    fn spawn_open_command_script(file_name: String, prefer_existing_window: bool) {
+        let is_directory = Path::new(&file_name).is_dir();
+        let quoted_file_name = if is_directory {
+            None
+        } else {
+            match shlex::try_quote(&file_name) {
+                Ok(name) => Some(name.into_owned()),
+                Err(_) => {
+                    log::error!(
+                        "OpenCommandScript: {file_name} has embedded NUL bytes and
+                         cannot be launched via the shell"
+                    );
+                    return;
+                }
+            }
+        };
+
+        promise::spawn::spawn(async move {
+            use config::keyassignment::SpawnTabDomain;
+            use wezterm_term::TerminalSize;
+
+            // We send the script to execute to the shell on stdin, rather than ask the
+            // shell to execute it directly, so that we start the shell and read in the
+            // user's rc files before running the script.  Without this, wezterm on macOS
+            // is launched with a default and very anemic path, and that is frustrating for
+            // users.
+
+            let mux = Mux::get();
+            let workspace = mux.active_workspace();
+            let window_id = if prefer_existing_window {
+                let mut windows = mux.iter_windows_in_workspace(&workspace);
+                windows.pop()
+            } else {
+                None
+            };
+            let pane_id = None;
+            let cmd = None;
+            let cwd = if is_directory {
+                Some(file_name.clone())
+            } else {
+                None
+            };
+
+            match mux
+                .spawn_tab_or_window(
+                    window_id,
+                    SpawnTabDomain::DomainName("local".to_string()),
+                    cmd,
+                    cwd,
+                    TerminalSize::default(),
+                    pane_id,
+                    workspace,
+                    None, // optional position
+                )
+                .await
+            {
+                Ok((_tab, pane, _window_id)) => {
+                    if let Some(quoted_file_name) = quoted_file_name {
+                        log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
+                        let mut writer = pane.writer();
+                        write!(writer, "{quoted_file_name} ; exit\n").ok();
+                    } else {
+                        log::trace!("Spawned pane_id {} with cwd={file_name}", pane.pane_id());
+                    }
+                }
+                Err(err) => {
+                    log::error!("Failed to spawn {file_name}: {err:#?}");
+                }
+            };
+        })
+        .detach();
+    }
+
     fn app_event_handler(event: ApplicationEvent) {
         match event {
             ApplicationEvent::OpenCommandScript(file_name) => {
-                let is_directory = Path::new(&file_name).is_dir();
-                let quoted_file_name = if is_directory {
-                    None
-                } else {
-                    match shlex::try_quote(&file_name) {
-                        Ok(name) => Some(name.into_owned()),
-                        Err(_) => {
-                            log::error!(
-                                "OpenCommandScript: {file_name} has embedded NUL bytes and
-                                 cannot be launched via the shell"
-                            );
-                            return;
-                        }
-                    }
-                };
-                promise::spawn::spawn(async move {
-                    use config::keyassignment::SpawnTabDomain;
-                    use wezterm_term::TerminalSize;
-
-                    // We send the script to execute to the shell on stdin, rather than ask the
-                    // shell to execute it directly, so that we start the shell and read in the
-                    // user's rc files before running the script.  Without this, wezterm on macOS
-                    // is launched with a default and very anemic path, and that is frustrating for
-                    // users.
-
-                    let mux = Mux::get();
-                    let window_id = None;
-                    let pane_id = None;
-                    let cmd = None;
-                    let cwd = if is_directory {
-                        Some(file_name.clone())
-                    } else {
-                        None
-                    };
-                    let workspace = mux.active_workspace();
-
-                    match mux
-                        .spawn_tab_or_window(
-                            window_id,
-                            SpawnTabDomain::DomainName("local".to_string()),
-                            cmd,
-                            cwd,
-                            TerminalSize::default(),
-                            pane_id,
-                            workspace,
-                            None, // optional position
-                        )
-                        .await
-                    {
-                        Ok((_tab, pane, _window_id)) => {
-                            if let Some(quoted_file_name) = quoted_file_name {
-                                log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
-                                let mut writer = pane.writer();
-                                write!(writer, "{quoted_file_name} ; exit\n").ok();
-                            } else {
-                                log::trace!(
-                                    "Spawned pane_id {} with cwd={file_name}",
-                                    pane.pane_id()
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            log::error!("Failed to spawn {file_name}: {err:#?}");
-                        }
-                    };
-                })
-                .detach();
+                Self::spawn_open_command_script(file_name, false);
+            }
+            ApplicationEvent::OpenCommandScriptInTab(file_name) => {
+                Self::spawn_open_command_script(file_name, true);
             }
             ApplicationEvent::PerformKeyAssignment(action) => {
                 // We should only get here when there are no windows open
@@ -423,10 +476,11 @@ impl GuiFrontEnd {
                     KeyAssignment::EmitEvent(event) if event == "open-kaku-config" => {
                         open_kaku_config();
                     }
+                    KeyAssignment::EmitEvent(event) if event == SET_DEFAULT_TERMINAL_EVENT => {
+                        set_default_terminal_with_feedback();
+                    }
                     KeyAssignment::ReloadConfiguration => {
-                        config::reload();
-                        refresh_fast_config_snapshot();
-                        persistent_toast_notification("Kaku", "Configuration reloaded");
+                        // Manual reload is intentionally disabled.
                     }
                     KeyAssignment::QuitApplication => {
                         // If we get here, there are no windows that could have received

@@ -218,7 +218,9 @@ for bin_name in "${VENDOR_BINARIES[@]}"; do
 	fi
 done
 
-codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP_BUNDLE_OUT"
+codesign --force --deep --options runtime \
+	--entitlements assets/macos/Kaku.entitlements \
+	--sign "$SIGNING_IDENTITY" "$APP_BUNDLE_OUT"
 
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"

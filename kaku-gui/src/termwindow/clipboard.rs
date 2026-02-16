@@ -3,8 +3,11 @@ use crate::TermWindow;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
 use mux::Mux;
+use smol::Timer;
+use std::path::PathBuf;
 use std::sync::Arc;
-use window::{Clipboard, WindowOps};
+use std::time::{Duration, Instant};
+use window::{Clipboard, ClipboardData, WindowOps};
 
 impl TermWindow {
     pub fn copy_to_clipboard(&self, clipboard: ClipboardCopyDestination, text: String) {
@@ -23,6 +26,45 @@ impl TermWindow {
         }
     }
 
+    /// Show toast notification with a message (disappears after 2.5 seconds).
+    /// Rapid consecutive calls are safe: each toast stores its creation `Instant`,
+    /// so only the matching toast is cleared — newer toasts naturally supersede older ones.
+    pub fn show_toast(&mut self, message: String) {
+        let now = Instant::now();
+        self.toast = Some((now, message));
+        if let Some(window) = self.window.clone() {
+            let win = window.clone();
+            // Trigger fade-out after 2000ms
+            let fade_win = win.clone();
+            promise::spawn::spawn(async move {
+                Timer::after(Duration::from_millis(2000)).await;
+                fade_win.invalidate();
+            })
+            .detach();
+            // Clear after 2500ms
+            promise::spawn::spawn(async move {
+                Timer::after(Duration::from_millis(2500)).await;
+                window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
+                    if let Some((toast_time, _)) = &tw.toast {
+                        if *toast_time == now {
+                            tw.toast = None;
+                        }
+                    }
+                    win.invalidate();
+                })));
+            })
+            .detach();
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.invalidate();
+        }
+    }
+
+    /// Show "Copied" toast notification
+    pub fn show_copy_toast(&mut self) {
+        self.show_toast("Copied".to_string());
+    }
+
     pub fn paste_from_clipboard(&mut self, pane: &Arc<dyn Pane>, clipboard: ClipboardPasteSource) {
         let pane_id = pane.pane_id();
         log::trace!(
@@ -35,26 +77,97 @@ impl TermWindow {
             ClipboardPasteSource::Clipboard => Clipboard::Clipboard,
             ClipboardPasteSource::PrimarySelection => Clipboard::PrimarySelection,
         };
-        let future = window.get_clipboard(clipboard);
+        let quote_dropped_files = self.config.quote_dropped_files;
+        let future = window.get_clipboard_data(clipboard);
         promise::spawn::spawn(async move {
-            if let Ok(clip) = future.await {
-                window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
-                    if let Some(pane) = myself
-                        .pane_state(pane_id)
-                        .overlay
-                        .as_ref()
-                        .map(|overlay| overlay.pane.clone())
-                        .or_else(|| {
-                            let mux = Mux::get();
-                            mux.get_pane(pane_id)
-                        })
-                    {
-                        pane.send_paste(&clip).ok();
-                    }
-                })));
+            match future.await {
+                Ok(data) => {
+                    window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
+                        let clip = match data_to_paste_string(data, quote_dropped_files) {
+                            Some(clip) => clip,
+                            None => return,
+                        };
+
+                        if let Some(pane) = myself
+                            .pane_state(pane_id)
+                            .overlay
+                            .as_ref()
+                            .map(|overlay| overlay.pane.clone())
+                            .or_else(|| {
+                                let mux = Mux::get();
+                                mux.get_pane(pane_id)
+                            })
+                        {
+                            if let Err(err) = pane.send_paste(&clip) {
+                                log::warn!(
+                                    "failed to paste clipboard content into pane {pane_id}: {err:#}"
+                                );
+                            }
+                        }
+                    })));
+                }
+                Err(err) => {
+                    log::warn!("failed to read clipboard for pane {pane_id}: {err:#}");
+                }
             }
         })
         .detach();
         self.maybe_scroll_to_bottom_for_input(&pane);
+    }
+}
+
+fn data_to_paste_string(
+    data: ClipboardData,
+    quote_dropped_files: config::DroppedFileQuoting,
+) -> Option<String> {
+    match data {
+        ClipboardData::Text(text) => Some(text),
+        ClipboardData::Files(paths) => {
+            if paths.is_empty() {
+                return None;
+            }
+            Some(format_dropped_paths(paths, quote_dropped_files))
+        }
+    }
+}
+
+fn format_dropped_paths(
+    paths: Vec<PathBuf>,
+    quote_dropped_files: config::DroppedFileQuoting,
+) -> String {
+    paths
+        .iter()
+        .map(|path| quote_path_for_clipboard_paste(path, quote_dropped_files))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + " " // Trailing space so the shell treats this as ready-to-append arguments.
+}
+
+fn quote_path_for_clipboard_paste(
+    path: &PathBuf,
+    quote_dropped_files: config::DroppedFileQuoting,
+) -> String {
+    let path = path.to_string_lossy();
+    match quote_dropped_files {
+        config::DroppedFileQuoting::None => path.into_owned(),
+        // Clipboard file paste used to be POSIX-quoted before image support was added.
+        // Keep that safety baseline for default SpacesOnly mode.
+        config::DroppedFileQuoting::SpacesOnly | config::DroppedFileQuoting::Posix => {
+            let path_str = path.to_string();
+            match shlex::try_quote(&path_str) {
+                Ok(quoted) => quoted.into_owned(),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to quote path {:?} for clipboard paste: {}. Using as-is.",
+                        path_str,
+                        e
+                    );
+                    path_str
+                }
+            }
+        }
+        config::DroppedFileQuoting::Windows | config::DroppedFileQuoting::WindowsAlwaysQuoted => {
+            quote_dropped_files.escape(path.as_ref())
+        }
     }
 }

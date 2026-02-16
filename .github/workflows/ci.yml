@@ -6,25 +6,49 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: write
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   fmt:
-    name: Format Check
+    name: Format
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
 
+      - name: Run formatter
+        run: make fmt
+
+      - name: Commit formatted changes
+        if: >
+          github.actor != 'github-actions[bot]' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository))
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "style: auto format"
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          fi
+
       - name: Check formatting
-        run: cargo +nightly fmt -p kaku -p kaku-gui -p mux -p wezterm-term -p termwiz -p config -p wezterm-font -- --check
+        run: make fmt-check
 
   test:
     name: Unit Tests

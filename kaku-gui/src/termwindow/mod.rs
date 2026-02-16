@@ -616,9 +616,15 @@ pub struct TermWindow {
 
     connection_name: String,
 
+    /// Tracks whether we are currently in a live resize operation
+    live_resizing: bool,
+
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
+
+    /// Toast notification: (start_time, message)
+    toast: Option<(Instant, String)>,
 }
 
 impl TermWindow {
@@ -951,6 +957,8 @@ impl TermWindow {
             key_table_state: KeyTableState::default(),
             modal: RefCell::new(None),
             opengl_info: None,
+            toast: None,
+            live_resizing: false,
         };
 
         let tw = Rc::new(RefCell::new(myself));
@@ -1094,7 +1102,7 @@ impl TermWindow {
                 // be nasty for folks with a lot of windows.
                 // <https://github.com/wezterm/wezterm/issues/2295>
                 config::reload();
-                self.config_was_reloaded();
+                self.config_was_reloaded_silently();
                 Ok(true)
             }
             WindowEvent::PerformKeyAssignment(action) => {
@@ -1390,7 +1398,9 @@ impl TermWindow {
             TermWindowNotif::SetConfigOverrides(value) => {
                 if value != self.config_overrides {
                     self.config_overrides = value;
-                    self.config_was_reloaded();
+                    // Overrides are often updated by runtime hooks (eg: resize/fullscreen),
+                    // so keep this reload silent to avoid noisy toast spam.
+                    self.config_was_reloaded_silently();
                 }
             }
             TermWindowNotif::CancelOverlayForPane {
@@ -1925,6 +1935,20 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    /// Decide whether the tab bar should be visible based on tab count,
+    /// fullscreen state, and config.
+    fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
+        let is_full_screen = self.window_state.contains(WindowState::FULL_SCREEN);
+        if is_full_screen {
+            // Always show tab bar in fullscreen mode to display the right status (time)
+            self.config.enable_tab_bar
+        } else if num_tabs == 1 {
+            self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
+        } else {
+            self.config.enable_tab_bar
+        }
+    }
+
     fn palette(&mut self) -> &ColorPalette {
         if self.palette.is_none() {
             self.palette
@@ -1934,21 +1958,45 @@ impl TermWindow {
     }
 
     pub fn config_was_reloaded(&mut self) {
+        // Skip config reload during live resizing to avoid performance issues
+        // when dragging the window. The reload will be processed after resize completes.
+        if self.live_resizing {
+            log::trace!("Skipping config reload during live resizing");
+            return;
+        }
+
+        self.config_was_reloaded_impl();
+    }
+
+    fn config_was_reloaded_silently(&mut self) {
+        if self.live_resizing {
+            return;
+        }
+        self.config_was_reloaded_impl();
+    }
+
+    fn config_was_reloaded_impl(&mut self) {
         log::debug!(
             "config was reloaded, overrides: {:?}",
             self.config_overrides
         );
         self.key_table_state.clear_stack();
         self.connection_name = Connection::get().unwrap().name();
-        let config = match config::overridden_config(&self.config_overrides) {
-            Ok(config) => config,
-            Err(err) => {
-                log::error!(
-                    "Failed to apply config overrides to window: {:#}: {:?}",
-                    err,
-                    self.config_overrides
-                );
-                configuration()
+        let config = if matches!(&self.config_overrides, Value::Null)
+            || matches!(&self.config_overrides, Value::Object(obj) if obj.is_empty())
+        {
+            configuration()
+        } else {
+            match config::overridden_config(&self.config_overrides) {
+                Ok(config) => config,
+                Err(err) => {
+                    log::error!(
+                        "Failed to apply config overrides to window: {:#}: {:?}",
+                        err,
+                        self.config_overrides
+                    );
+                    configuration()
+                }
             }
         };
         self.config = config.clone();
@@ -1959,11 +2007,7 @@ impl TermWindow {
             Some(window) => window,
             _ => return,
         };
-        if window.len() == 1 {
-            self.show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
-        } else {
-            self.show_tab_bar = config.enable_tab_bar;
-        }
+        self.show_tab_bar = self.should_show_tab_bar(window.len());
         *self.cursor_blink_state.borrow_mut() = ColorEase::new(
             config.cursor_blink_rate,
             config.cursor_blink_ease_in,
@@ -2284,11 +2328,7 @@ impl TermWindow {
         if let Some(window) = self.window.as_ref() {
             window.set_title(&title);
 
-            let show_tab_bar = if num_tabs == 1 {
-                self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
-            } else {
-                self.config.enable_tab_bar
-            };
+            let show_tab_bar = self.should_show_tab_bar(num_tabs);
 
             // If the number of tabs changed and caused the tab bar to
             // hide/show, then we'll need to resize things. We only update
@@ -3074,14 +3114,7 @@ impl TermWindow {
             CloseCurrentTab { confirm } => self.close_current_tab(*confirm),
             CloseCurrentPane { confirm } => self.close_current_pane(*confirm),
             Nop | DisableDefaultAssignment => {}
-            ReloadConfiguration => {
-                config::reload();
-                crate::frontend::refresh_fast_config_snapshot();
-                wezterm_toast_notification::persistent_toast_notification(
-                    "Kaku",
-                    "Configuration reloaded",
-                );
-            }
+            ReloadConfiguration => {}
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,
@@ -3169,6 +3202,24 @@ impl TermWindow {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "open-kaku-config" {
                     crate::frontend::open_kaku_config();
+                } else if name == crate::frontend::SET_DEFAULT_TERMINAL_EVENT {
+                    match Connection::get() {
+                        Some(conn) => match conn.set_default_terminal() {
+                            Ok(()) => {
+                                self.show_toast("Kaku is now the default terminal".to_string());
+                            }
+                            Err(err) => {
+                                log::error!("Failed to set Kaku as default terminal: {err:#}");
+                                self.show_toast("Failed to set default terminal".to_string());
+                            }
+                        },
+                        None => {
+                            log::error!(
+                                "Cannot set default terminal because no GUI connection is available"
+                            );
+                            self.show_toast("Failed to set default terminal".to_string());
+                        }
+                    }
                 } else {
                     self.emit_window_event(name, None);
                 }
@@ -3177,8 +3228,7 @@ impl TermWindow {
                 let text = self.selection_text(pane);
                 if !text.is_empty() {
                     self.copy_to_clipboard(*dest, text);
-                    let window = self.window.as_ref().unwrap();
-                    window.invalidate();
+                    self.show_copy_toast();
                 } else {
                     self.do_open_link_at_mouse_cursor(pane);
                 }
@@ -3187,8 +3237,7 @@ impl TermWindow {
                 let text = self.selection_text(pane);
                 if !text.is_empty() {
                     self.copy_to_clipboard(*dest, text);
-                    let window = self.window.as_ref().unwrap();
-                    window.invalidate();
+                    self.show_copy_toast();
                 }
             }
             ClearScrollback(erase_mode) => {

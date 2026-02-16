@@ -683,6 +683,8 @@ impl crate::TermWindow {
             let (intensity, next) = color_ease.intensity_continuous();
 
             cursor_border_mix = intensity;
+            // Blend the cursor towards the cell background color.
+            // This keeps blinking behavior consistent across AA modes.
             cursor_border_color_alt = params.bg_color;
 
             if matches!(
@@ -708,12 +710,12 @@ impl crate::TermWindow {
             cursor_border_mix,
             cursor_shape: if visibility == CursorVisibility::Visible {
                 match cursor_shape {
+                    // Render block cursor with the default sprite so it blinks as a full cell.
                     CursorShape::BlinkingBlock | CursorShape::SteadyBlock if focused_and_active => {
                         Some(CursorShape::Default)
                     }
-                    // When not focused, convert bar to block to make it more visually
-                    // distinct from the focused bar in another pane
-                    _shape if !focused_and_active => Some(CursorShape::SteadyBlock),
+                    // Keep inactive panes cursorless for a cleaner split view.
+                    _shape if !focused_and_active => None,
                     shape => Some(shape),
                 }
             } else {

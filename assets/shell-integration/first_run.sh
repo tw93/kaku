@@ -4,11 +4,47 @@
 
 set -euo pipefail
 
+CURRENT_CONFIG_VERSION=8
+CONFIG_DIR="$HOME/.config/kaku"
+STATE_FILE="$CONFIG_DIR/state.json"
+LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
+LEGACY_GEOMETRY_FILE="$CONFIG_DIR/.kaku_window_geometry"
+
 # Always persist config version at script exit to avoid repeated onboarding loops
 # when optional setup steps fail on user machines.
 persist_config_version() {
-	mkdir -p "$HOME/.config/kaku"
-	echo "6" >"$HOME/.config/kaku/.kaku_config_version"
+	mkdir -p "$CONFIG_DIR"
+
+	local width height geometry_json
+	width=""
+	height=""
+	geometry_json=""
+
+	if [[ -f "$STATE_FILE" ]]; then
+		width="$(sed -nE 's/.*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
+		height="$(sed -nE 's/.*"height"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
+	fi
+
+	if [[ -z "$width" || -z "$height" ]] && [[ -f "$LEGACY_GEOMETRY_FILE" ]]; then
+		local geometry
+		geometry="$(tr -d '[:space:]' < "$LEGACY_GEOMETRY_FILE" || true)"
+		local a b c d
+		IFS=',' read -r a b c d <<< "$geometry"
+		if [[ "${c:-}" =~ ^[0-9]+$ && "${d:-}" =~ ^[0-9]+$ ]]; then
+			width="$c"
+			height="$d"
+		elif [[ "${a:-}" =~ ^[0-9]+$ && "${b:-}" =~ ^[0-9]+$ ]]; then
+			width="$a"
+			height="$b"
+		fi
+	fi
+
+	if [[ -n "$width" && -n "$height" ]]; then
+		geometry_json="$(printf ',\n  "window_geometry": {\n    "width": %s,\n    "height": %s\n  }' "$width" "$height")"
+	fi
+
+	printf "{\n  \"config_version\": %s%s\n}\n" "$CURRENT_CONFIG_VERSION" "$geometry_json" >"$STATE_FILE"
+	rm -f "$LEGACY_VERSION_FILE" "$LEGACY_GEOMETRY_FILE"
 }
 trap persist_config_version EXIT
 
@@ -85,6 +121,11 @@ echo "  - z - Smart Directory Jumper"
 echo "  - zsh-completions - Rich Tab Completions"
 echo "  - Zsh Syntax Highlighting"
 echo "  - Zsh Autosuggestions"
+echo ""
+echo "Shell config model:"
+echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
+echo "  - .zshrc only gets one source line"
+echo "  - You can roll back anytime with: kaku reset"
 echo "--------------------------------------------------------"
 echo ""
 
@@ -142,7 +183,7 @@ else
 	echo "$SETUP_SCRIPT"
 fi
 
-mkdir -p "$HOME/.config/kaku"
+mkdir -p "$CONFIG_DIR"
 
 resolve_kaku_cli() {
 	local candidates=(
@@ -205,7 +246,7 @@ if [[ "$INSTALL_DELTA" == "true" ]]; then
 	fi
 fi
 
-echo -e "\n\033[1;32m❤️ Kaku environment is ready! Enjoy coding.\033[0m"
+echo -e "\n\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"
 
 # `exec` replaces the shell process and skips EXIT trap handlers.
 # Persist explicitly here so successful first-run/upgrade paths are recorded.

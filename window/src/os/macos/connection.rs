@@ -4,13 +4,15 @@
 use super::nsstring_to_str;
 use super::window::WindowInner;
 use crate::connection::ConnectionOps;
-use crate::os::macos::app::create_app_delegate;
+use crate::os::macos::app::{create_app_delegate, flush_pending_service_opens};
 use crate::screen::{ScreenInfo, Screens};
 use crate::spawn::*;
 use crate::Appearance;
 use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSScreen};
 use cocoa::base::{id, nil};
 use cocoa::foundation::{NSArray, NSInteger};
+use core_foundation::base::TCFType;
+use core_foundation::string::{CFString, CFStringRef};
 use objc::runtime::{Object, BOOL, YES};
 use objc::*;
 use serde::Deserialize;
@@ -96,6 +98,35 @@ impl SoftwareVersion {
         let vers: Self = plist::from_file("/System/Library/CoreServices/SystemVersion.plist")?;
         Ok(vers)
     }
+}
+
+const NO_ERR: i32 = 0;
+/// `kLSRolesAll` from LaunchServices — matches all handler roles.
+const KLS_ROLES_ALL: u32 = !0;
+const KAKU_BUNDLE_IDENTIFIER: &str = "fun.tw93.kaku";
+
+fn set_default_role_handler_for_content_type(
+    content_type: &str,
+    role_mask: u32,
+    bundle_id: &CFString,
+) -> anyhow::Result<()> {
+    let content_type = CFString::new(content_type);
+    let status = unsafe {
+        LSSetDefaultRoleHandlerForContentType(
+            content_type.as_concrete_TypeRef(),
+            role_mask,
+            bundle_id.as_concrete_TypeRef(),
+        )
+    };
+    if status != NO_ERR {
+        anyhow::bail!(
+            "LSSetDefaultRoleHandlerForContentType({}, role={:#x}) failed: {}",
+            content_type.to_string(),
+            role_mask,
+            status
+        );
+    }
+    Ok(())
 }
 
 impl ConnectionOps for Connection {
@@ -199,6 +230,30 @@ impl ConnectionOps for Connection {
         }
     }
 
+    fn set_default_terminal(&self) -> anyhow::Result<()> {
+        let bundle_id = CFString::new(KAKU_BUNDLE_IDENTIFIER);
+
+        // Match the shell-related document types Kaku declares in Info.plist.
+        let shell_content_types = [
+            "public.unix-executable",
+            "public.script",
+            "public.shell-script",
+            "public.bash-script",
+            "public.zsh-script",
+            "com.apple.terminal.shell-script",
+        ];
+
+        for content_type in shell_content_types {
+            set_default_role_handler_for_content_type(content_type, KLS_ROLES_ALL, &bundle_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn flush_pending_service_events(&self) {
+        flush_pending_service_opens();
+    }
+
     fn screens(&self) -> anyhow::Result<Screens> {
         let mut by_name = HashMap::new();
         let mut virtual_rect = euclid::rect(0, 0, 0, 0);
@@ -224,6 +279,18 @@ impl ConnectionOps for Connection {
             virtual_rect,
         })
     }
+}
+
+// NOTE: LSSetDefaultRoleHandlerForContentType is deprecated since macOS 12 (Monterey).
+// It still works as of macOS 15 but may be removed in a future release.
+// Track https://developer.apple.com/documentation/coreservices for replacements.
+#[link(name = "CoreServices", kind = "framework")]
+extern "C" {
+    fn LSSetDefaultRoleHandlerForContentType(
+        in_content_type: CFStringRef,
+        in_role: u32,
+        in_handler_bundle_id: CFStringRef,
+    ) -> i32;
 }
 
 pub fn nsscreen_to_screen_info(screen: *mut Object) -> ScreenInfo {

@@ -44,8 +44,60 @@ local fullscreen_uniform_padding = {
   bottom = '30px',
 }
 
+-- Per-window resize debounce state.
+-- Weak keys ensure closed windows don't leak state.
+local resize_state_by_window = setmetatable({}, { __mode = 'k' })
+
+local function monotonic_now()
+  -- Keep this numeric for debounce arithmetic.
+  -- Some runtime environments expose os.clock() as a non-number value.
+  local ok, value = pcall(os.clock)
+  if ok and type(value) == 'number' then
+    return value
+  end
+  return os.time()
+end
+
+local function dims_hash(dims)
+  return dims.pixel_width .. "x" .. dims.pixel_height
+end
+
 local function update_window_config(window, is_full_screen)
+  local now = monotonic_now()
+  local dims = window:get_dimensions()
+  local current_hash = dims_hash(dims)
+  local state = resize_state_by_window[window]
+  if not state then
+    state = {
+      last_resize_time = 0,
+      last_dims_hash = "",
+    }
+    resize_state_by_window[window] = state
+  end
   local overrides = window:get_config_overrides() or {}
+  local needs_update = false
+
+  if is_full_screen then
+    needs_update = (not padding_matches(overrides.window_padding, fullscreen_uniform_padding))
+      or overrides.hide_tab_bar_if_only_one_tab ~= false
+  else
+    needs_update = overrides.window_padding ~= nil or overrides.hide_tab_bar_if_only_one_tab ~= nil
+  end
+
+  -- Skip update if dimensions changed rapidly (within 1 second) and state is stable
+  -- This prevents padding flicker during fullscreen animation
+  if current_hash ~= state.last_dims_hash then
+    local time_since_last = now - state.last_resize_time
+    if time_since_last < 1.0 and not needs_update then
+      -- Rapid change detected, skip this update
+      state.last_dims_hash = current_hash
+      state.last_resize_time = now
+      return
+    end
+    state.last_dims_hash = current_hash
+    state.last_resize_time = now
+  end
+
   if is_full_screen then
     if not padding_matches(overrides.window_padding, fullscreen_uniform_padding) or overrides.hide_tab_bar_if_only_one_tab ~= false then
       overrides.window_padding = fullscreen_uniform_padding
@@ -155,40 +207,75 @@ wezterm.on('update-right-status', function(window)
 end)
 
 -- ===== Font =====
+-- System default CJK font (PingFang SC on macOS); let the system pick the best match.
 config.font = wezterm.font_with_fallback({
   { family = 'JetBrains Mono', weight = 'Regular' },
-  { family = 'PingFang SC', weight = 'Regular' },
+  -- Omit explicit CJK font; macOS selects the best one based on locale.
   'Apple Color Emoji',
 })
 
 config.font_rules = {
+  -- Prevent thin weight: use Regular instead of Light for Half intensity
+  {
+    intensity = 'Half',
+    font = wezterm.font_with_fallback({
+      { family = 'JetBrains Mono', weight = 'Regular' },
+    }),
+  },
+  -- Normal italic: disable real italics (keep upright)
   {
     intensity = 'Normal',
     italic = true,
     font = wezterm.font_with_fallback({
       { family = 'JetBrains Mono', weight = 'Regular', italic = false },
-      { family = 'PingFang SC', weight = 'Regular' },
+    }),
+  },
+  -- Bold: use Medium weight instead of Heavy
+  {
+    intensity = 'Bold',
+    font = wezterm.font_with_fallback({
+      { family = 'JetBrains Mono', weight = 'Medium' },
     }),
   },
 }
 
 config.bold_brightens_ansi_colors = false
-config.font_size = 17.0
-config.line_height = 1.30
-config.cell_width = 1.00
+-- Auto-adjust font size based on screen DPI.
+-- Retina (>=150 DPI): 17px, low-resolution external displays (<150 DPI): 15px.
+local function get_font_size()
+  local success, screens = pcall(function()
+    return wezterm.gui.screens()
+  end)
+  if success and screens and screens.main then
+    local dpi = screens.main.effective_dpi or 72
+    if dpi < 150 then
+      return 15.0  -- Low-resolution external display
+    end
+  end
+  return 17.0  -- Retina default
+end
+
+config.font_size = get_font_size()
+config.line_height = 1.28
+config.cell_width = 1.0
 config.harfbuzz_features = { 'calt=0', 'clig=0', 'liga=0' }
 config.use_cap_height_to_scale_fallback_fonts = false
 
-config.freetype_load_target = 'Normal'
-
-config.allow_square_glyphs_to_overflow_width = 'Always'
 config.custom_block_glyphs = true
 config.unicode_version = 14
+
+local _, in_app_bundle = wezterm.executable_dir:gsub('MacOS/?$', 'Resources')
+if in_app_bundle > 0 then
+  config.term = 'kaku'
+end
 
 -- ===== Cursor =====
 config.default_cursor_style = 'BlinkingBar'
 config.cursor_thickness = '2px'
-config.cursor_blink_rate = 0
+config.cursor_blink_rate = 500
+-- Sharp on/off blink without fade animation (like a standard terminal).
+config.cursor_blink_ease_in = 'Constant'
+config.cursor_blink_ease_out = 'Constant'
 
 -- ===== Scrollback =====
 config.scrollback_lines = 10000
@@ -206,7 +293,8 @@ config.window_padding = {
 
 config.initial_cols = 110
 config.initial_rows = 22
-config.window_decorations = "INTEGRATED_BUTTONS|RESIZE"
+-- Mitigate high GPU usage on macOS 26.x by disabling window shadow.
+config.window_decorations = "INTEGRATED_BUTTONS|RESIZE|MACOS_FORCE_DISABLE_SHADOW"
 config.window_frame = {
   font = wezterm.font({ family = 'JetBrains Mono', weight = 'Regular' }),
   font_size = 13.0,
@@ -215,6 +303,8 @@ config.window_frame = {
 }
 
 config.window_close_confirmation = 'NeverPrompt'
+config.window_background_opacity = 1.0
+config.text_background_opacity = 1.0
 
 -- ===== Tab Bar =====
 config.enable_tab_bar = true
@@ -225,8 +315,8 @@ config.hide_tab_bar_if_only_one_tab = true
 config.show_tab_index_in_tab_bar = true
 config.show_new_tab_button_in_tab_bar = false
 
--- Color scheme for tabs
-config.colors = {
+-- ===== Color Scheme =====
+local kaku_theme = {
   -- Background
   foreground = '#edecee',
   background = '#15141b',
@@ -270,6 +360,7 @@ config.colors = {
   -- Tab bar colors
   tab_bar = {
     background = '#15141b',
+    inactive_tab_edge = '#15141b',
 
     active_tab = {
       bg_color = '#29263c',
@@ -304,6 +395,12 @@ config.colors = {
   },
 }
 
+config.color_schemes = config.color_schemes or {}
+config.color_schemes['Kaku Theme'] = kaku_theme
+if not config.color_scheme then
+  config.color_scheme = 'Kaku Theme'
+end
+
 -- ===== Shell =====
 local user_shell = os.getenv('SHELL')
 if user_shell and #user_shell > 0 then
@@ -322,7 +419,17 @@ config.quit_when_all_windows_are_closed = false
 
 -- ===== Key Bindings =====
 config.keys = {
-  -- Cmd+R: clear screen + scrollback
+  -- Cmd+K: clear screen + scrollback
+  {
+    key = 'k',
+    mods = 'CMD',
+    action = wezterm.action.Multiple({
+      wezterm.action.SendKey({ key = 'l', mods = 'CTRL' }),
+      wezterm.action.ClearScrollback('ScrollbackAndViewport'),
+    }),
+  },
+
+  -- Compatibility: keep Cmd+R for existing muscle memory
   {
     key = 'r',
     mods = 'CMD',
@@ -398,19 +505,6 @@ config.keys = {
     key = 'h',
     mods = 'CMD',
     action = wezterm.action.HideApplication,
-  },
-
-  -- Cmd+Shift+.: reload configuration
-  {
-    key = '.',
-    mods = 'CMD|SHIFT',
-    action = wezterm.action.ReloadConfiguration,
-  },
-  -- Some layouts report Shift+. as mapped:>, keep this as a fallback.
-  {
-    key = 'mapped:>',
-    mods = 'CMD',
-    action = wezterm.action.ReloadConfiguration,
   },
 
   -- Cmd+Equal/Minus/0: adjust font size
@@ -645,30 +739,145 @@ config.swallow_mouse_click_on_window_focus = true
 -- ===== First Run Experience & Config Version Check =====
 wezterm.on('gui-startup', function(cmd)
   local home = os.getenv("HOME")
-  local current_version = 6  -- Update this when config changes
+  local current_version = 8  -- Update this when config changes
 
-  -- Check for configuration version
-  local version_file = home .. "/.config/kaku/.kaku_config_version"
+  local state_file = home .. "/.config/kaku/state.json"
+  local legacy_version_file = home .. "/.config/kaku/.kaku_config_version"
+  local legacy_geometry_file = home .. "/.config/kaku/.kaku_window_geometry"
   local is_first_run = false
   local needs_update = false
 
-  -- Read current user version
-  local vf = io.open(version_file, "r")
-  if vf then
-    -- Has version file, check if update needed
-    local user_version = tonumber(vf:read("*all")) or 0
-    vf:close()
-    if user_version < current_version then
-      needs_update = true
+  local function ensure_state_dir()
+    os.execute("mkdir -p " .. home .. "/.config/kaku")
+  end
+
+  local function write_state(version, geometry)
+    ensure_state_dir()
+    local state = {
+      config_version = version,
+    }
+    if geometry and geometry.width and geometry.height then
+      state.window_geometry = {
+        width = geometry.width,
+        height = geometry.height,
+      }
     end
-  else
-    -- New user, show first run
+
+    local encoded = nil
+    local ok, value = pcall(wezterm.json_encode, state)
+    if ok and type(value) == "string" and value ~= "" then
+      encoded = value
+    end
+
+    local wf = io.open(state_file, "w")
+    if wf then
+      if encoded then
+        wf:write(encoded .. "\n")
+      else
+        -- Manual JSON fallback when json_encode is unavailable.
+        -- Include geometry if present so state is not lost.
+        if geometry and geometry.width and geometry.height then
+          wf:write(string.format(
+            '{\n  "config_version": %d,\n  "window_geometry": {\n    "width": %d,\n    "height": %d\n  }\n}\n',
+            version, geometry.width, geometry.height))
+        else
+          wf:write(string.format('{\n  "config_version": %d\n}\n', version))
+        end
+      end
+      wf:close()
+    end
+  end
+
+  local function remove_legacy_files()
+    os.remove(legacy_version_file)
+    os.remove(legacy_geometry_file)
+  end
+
+  local function parse_legacy_geometry(raw)
+    if not raw or raw == "" then
+      return nil
+    end
+
+    local values = {}
+    for number in raw:gmatch("%d+") do
+      values[#values + 1] = tonumber(number)
+    end
+
+    if #values >= 4 then
+      return {
+        width = values[#values - 1],
+        height = values[#values],
+      }
+    elseif #values >= 2 then
+      return {
+        width = values[1],
+        height = values[2],
+      }
+    end
+
+    return nil
+  end
+
+  local function migrate_legacy_state_if_needed()
+    local existing_state = io.open(state_file, "r")
+    if existing_state then
+      existing_state:close()
+      return
+    end
+
+    local legacy_version = nil
+    local legacy_geometry = nil
+
+    local lv = io.open(legacy_version_file, "r")
+    if lv then
+      legacy_version = tonumber(lv:read("*all"))
+      lv:close()
+    end
+
+    local lg = io.open(legacy_geometry_file, "r")
+    if lg then
+      legacy_geometry = parse_legacy_geometry(lg:read("*all"))
+      lg:close()
+    end
+
+    local has_legacy_markers = legacy_version ~= nil or legacy_geometry ~= nil
+
+    if has_legacy_markers then
+      write_state(legacy_version or current_version, legacy_geometry)
+      remove_legacy_files()
+    end
+  end
+
+  migrate_legacy_state_if_needed()
+
+  local user_version = nil
+  local state_file_exists = false
+  local sf = io.open(state_file, "r")
+  if sf then
+    state_file_exists = true
+    local raw_state = sf:read("*all")
+    sf:close()
+    if raw_state and raw_state ~= "" then
+      local ok, state = pcall(wezterm.json_parse, raw_state)
+      if ok and type(state) == "table" then
+        user_version = tonumber(state.config_version)
+      end
+    end
+  end
+
+  if not state_file_exists then
     is_first_run = true
+  elseif user_version == nil then
+    -- Corrupted or manually edited state file: repair with safe defaults.
+    write_state(current_version, nil)
+    user_version = current_version
+  elseif user_version < current_version then
+    needs_update = true
   end
 
   if is_first_run then
     -- First run experience
-    os.execute("mkdir -p " .. home .. "/.config/kaku")
+    ensure_state_dir()
 
     local resource_dir = wezterm.executable_dir:gsub("MacOS/?$", "Resources")
     local first_run_script = resource_dir .. "/first_run.sh"
@@ -690,20 +899,20 @@ wezterm.on('gui-startup', function(cmd)
   end
 
   if needs_update then
-    -- Re-run guided setup on version upgrades
+    -- Apply incremental config updates on version upgrades
     local resource_dir = wezterm.executable_dir:gsub("MacOS/?$", "Resources")
-    local first_run_script = resource_dir .. "/first_run.sh"
+    local update_script = resource_dir .. "/check_config_version.sh"
 
     -- Fallback for dev environment
-    local f_script = io.open(first_run_script, "r")
-    if not f_script then
-      first_run_script = wezterm.executable_dir .. "/../../assets/shell-integration/first_run.sh"
+    local u_script = io.open(update_script, "r")
+    if not u_script then
+      update_script = wezterm.executable_dir .. "/../../assets/shell-integration/check_config_version.sh"
     else
-      f_script:close()
+      u_script:close()
     end
 
     wezterm.mux.spawn_window {
-      args = { 'bash', first_run_script },
+      args = { 'bash', update_script },
       width = 106,
       height = 22,
     }

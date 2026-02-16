@@ -3,7 +3,7 @@ use crate::macos::menu::RepresentedItem;
 use crate::macos::{nsstring, nsstring_to_str};
 use crate::menu::{Menu, MenuItem};
 use crate::{ApplicationEvent, Connection};
-use cocoa::appkit::NSApplicationTerminateReply;
+use cocoa::appkit::{NSApp, NSApplicationTerminateReply, NSFilenamesPboardType, NSStringPboardType};
 use cocoa::base::id;
 use cocoa::foundation::NSInteger;
 use config::keyassignment::KeyAssignment;
@@ -13,12 +13,18 @@ use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::*;
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use url::Url;
 
 const CLS_NAME: &str = "KakuAppDelegate";
 
 thread_local! {
     static LAST_OPEN_UNTITLED_SPAWN: RefCell<Option<Instant>> = RefCell::new(None);
+}
+
+lazy_static::lazy_static! {
+    static ref PENDING_SERVICE_OPENS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 }
 // macOS can emit applicationOpenUntitledFile twice while no window has
 // materialized yet; keep a wider debounce to avoid duplicate SpawnWindow work.
@@ -92,6 +98,7 @@ extern "C" fn application_will_finish_launching(
 extern "C" fn application_did_finish_launching(this: &mut Object, _sel: Sel, _notif: *mut Object) {
     log::debug!("application_did_finish_launching");
     unsafe {
+        let () = msg_send![NSApp(), setServicesProvider: this as *mut Object];
         (*this).set_ivar("launched", YES);
     }
 }
@@ -182,6 +189,158 @@ extern "C" fn application_open_file(
     NO
 }
 
+extern "C" fn application_open_files(
+    this: &mut Object,
+    _sel: Sel,
+    app: *mut Object,
+    file_names: *mut Object,
+) {
+    #[allow(non_upper_case_globals)]
+    const NSApplicationDelegateReplySuccess: NSInteger = 0;
+    #[allow(non_upper_case_globals)]
+    const NSApplicationDelegateReplyFailure: NSInteger = 2;
+
+    let mut reply = NSApplicationDelegateReplyFailure;
+    let launched: BOOL = unsafe { *this.get_ivar("launched") };
+    if launched == YES {
+        if let Some(conn) = Connection::get() {
+            let mut dispatched = false;
+            unsafe {
+                let count: NSInteger = msg_send![file_names, count];
+                for i in 0..count {
+                    let file_name: *mut Object = msg_send![file_names, objectAtIndex: i];
+                    let file_str = nsstring_to_str(file_name).to_string();
+                    log::debug!("application_open_files {file_str}");
+                    conn.dispatch_app_event(ApplicationEvent::OpenCommandScript(file_str));
+                    dispatched = true;
+                }
+            }
+            if dispatched {
+                reply = NSApplicationDelegateReplySuccess;
+            }
+        }
+    }
+
+    unsafe {
+        let target = if app.is_null() { NSApp() } else { app };
+        let _: () = msg_send![target, replyToOpenOrPrint: reply];
+    }
+}
+
+fn first_service_path(pasteboard: *mut Object) -> Option<String> {
+    if pasteboard.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let files: id = msg_send![pasteboard, propertyListForType: NSFilenamesPboardType];
+        if !files.is_null() {
+            let count: NSInteger = msg_send![files, count];
+            if count > 0 {
+                let file_name: *mut Object = msg_send![files, objectAtIndex: 0];
+                if !file_name.is_null() {
+                    return Some(nsstring_to_str(file_name).to_string());
+                }
+            }
+        }
+
+        let text: *mut Object = msg_send![pasteboard, stringForType: NSStringPboardType];
+        if text.is_null() {
+            return None;
+        }
+
+        let raw = nsstring_to_str(text).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+
+        if let Ok(url) = Url::parse(&raw) {
+            if url.scheme() == "file" {
+                if let Ok(path) = url.to_file_path() {
+                    return Some(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+
+        Some(raw)
+    }
+}
+
+fn dispatch_or_queue_service_open(path: String, prefer_existing_window: bool) {
+    if let Some(conn) = Connection::get() {
+        let event = if prefer_existing_window {
+            ApplicationEvent::OpenCommandScriptInTab(path)
+        } else {
+            ApplicationEvent::OpenCommandScript(path)
+        };
+        conn.dispatch_app_event(event);
+        return;
+    }
+
+    log::debug!("service request queued until GUI connection is ready");
+    PENDING_SERVICE_OPENS
+        .lock()
+        .unwrap()
+        .push((path, prefer_existing_window));
+}
+
+pub(crate) fn flush_pending_service_opens() {
+    let pending = {
+        let mut queued = PENDING_SERVICE_OPENS.lock().unwrap();
+        std::mem::take(&mut *queued)
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    if let Some(conn) = Connection::get() {
+        for (path, prefer_existing_window) in pending {
+            let event = if prefer_existing_window {
+                ApplicationEvent::OpenCommandScriptInTab(path)
+            } else {
+                ApplicationEvent::OpenCommandScript(path)
+            };
+            conn.dispatch_app_event(event);
+        }
+    } else {
+        let mut queued = PENDING_SERVICE_OPENS.lock().unwrap();
+        queued.extend(pending);
+    }
+}
+
+extern "C" fn open_in_kaku_service(
+    _self: &mut Object,
+    _sel: Sel,
+    pasteboard: *mut Object,
+    _user_data: *mut Object,
+    _error: *mut Object,
+) {
+    let Some(path) = first_service_path(pasteboard) else {
+        log::warn!("openInKakuService: Finder provided no usable paths");
+        return;
+    };
+
+    log::debug!("openInKakuService {path}");
+    dispatch_or_queue_service_open(path, true);
+}
+
+extern "C" fn open_in_kaku_window_service(
+    _self: &mut Object,
+    _sel: Sel,
+    pasteboard: *mut Object,
+    _user_data: *mut Object,
+    _error: *mut Object,
+) {
+    let Some(path) = first_service_path(pasteboard) else {
+        log::warn!("openInKakuWindowService: Finder provided no usable paths");
+        return;
+    };
+
+    log::debug!("openInKakuWindowService {path}");
+    dispatch_or_queue_service_open(path, false);
+}
+
 extern "C" fn application_dock_menu(
     _self: &mut Object,
     _sel: Sel,
@@ -227,6 +386,10 @@ fn get_class() -> &'static Class {
                     as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object) -> BOOL,
             );
             cls.add_method(
+                sel!(application:openFiles:),
+                application_open_files as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object),
+            );
+            cls.add_method(
                 sel!(applicationDockMenu:),
                 application_dock_menu
                     as extern "C" fn(&mut Object, Sel, *mut Object) -> *mut Object,
@@ -249,6 +412,16 @@ fn get_class() -> &'static Class {
                 sel!(applicationOpenUntitledFile:),
                 application_open_untitled_file
                     as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            );
+            cls.add_method(
+                sel!(openInKakuService:userData:error:),
+                open_in_kaku_service
+                    as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object),
+            );
+            cls.add_method(
+                sel!(openInKakuWindowService:userData:error:),
+                open_in_kaku_window_service
+                    as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object),
             );
         }
 

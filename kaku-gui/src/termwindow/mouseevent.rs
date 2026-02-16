@@ -297,9 +297,6 @@ impl super::TermWindow {
                 ) {
                     return;
                 }
-                if event.coords.y < terminal_origin_y {
-                    return;
-                }
             }
         }
 
@@ -337,7 +334,12 @@ impl super::TermWindow {
                 self.current_mouse_capture = Some(MouseCapture::UI);
             }
             self.mouse_event_ui_item(item, pane, y, event, context);
-        } else if event.coords.y < terminal_origin_y {
+        } else if event.coords.y < terminal_origin_y
+            && !matches!(
+                self.current_mouse_capture,
+                Some(MouseCapture::TerminalPane(_))
+            )
+        {
             // Event landed in title/padding area above terminal content but missed all UI items.
             match event.kind {
                 WMEK::Press(MousePress::Left) => {
@@ -373,8 +375,7 @@ impl super::TermWindow {
         } else if matches!(
             self.current_mouse_capture,
             None | Some(MouseCapture::TerminalPane(_))
-        ) && event.coords.y >= terminal_origin_y
-        {
+        ) {
             self.mouse_event_terminal(
                 pane,
                 ClickPosition {
