@@ -151,7 +151,7 @@ enum SubCommand {
     Reset(reset::ResetCommand),
 
     #[command(
-        name = "aicode",
+        name = "ai",
         about = "Manage AI coding tools configuration (Claude Code, OpenCode, OpenClaw)"
     )]
     Ai(ai_config::AiConfigCommand),
@@ -811,7 +811,7 @@ fn select_main_menu_command() -> anyhow::Result<SubCommand> {
     println!("  2. update   Check and install latest version");
     println!("  3. init     Initialize shell integration");
     println!("  4. reset    Remove Kaku shell integration and managed defaults");
-    println!("  5. aicode   Manage AI coding tools configuration");
+    println!("  5. ai       Manage AI coding tools configuration");
     println!("  q. quit");
     println!();
 
@@ -829,7 +829,7 @@ fn select_main_menu_command() -> anyhow::Result<SubCommand> {
             "2" | "update" => return Ok(SubCommand::Update(update::UpdateCommand::default())),
             "3" | "init" => return Ok(SubCommand::Init(init::InitCommand::default())),
             "4" | "reset" => return Ok(SubCommand::Reset(reset::ResetCommand::default())),
-            "5" | "aicode" => return Ok(SubCommand::Ai(ai_config::AiConfigCommand::default())),
+            "5" | "ai" => return Ok(SubCommand::Ai(ai_config::AiConfigCommand::default())),
             "q" | "quit" | "exit" => std::process::exit(0),
             _ => {
                 println!("Invalid option. Enter 1, 2, 3, 4, 5, or q.");
