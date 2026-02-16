@@ -272,7 +272,7 @@ end
 -- ===== Cursor =====
 config.default_cursor_style = 'BlinkingBar'
 config.cursor_thickness = '2px'
-config.cursor_blink_rate = 0
+config.cursor_blink_rate = 500
 
 -- ===== Scrollback =====
 config.scrollback_lines = 10000

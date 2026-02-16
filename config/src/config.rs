@@ -1983,12 +1983,12 @@ fn default_inactive_pane_hsb() -> HsbTransform {
 
 #[derive(FromDynamic, ToDynamic, Clone, Copy, Debug, Default)]
 pub enum DefaultCursorStyle {
-    BlinkingBlock,
     #[default]
+    BlinkingBar,
+    BlinkingBlock,
     SteadyBlock,
     BlinkingUnderline,
     SteadyUnderline,
-    BlinkingBar,
     SteadyBar,
 }
 
