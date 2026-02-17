@@ -90,6 +90,16 @@ use prevcursor::PrevCursorPos;
 
 const ATLAS_SIZE: usize = 128;
 
+fn debug_mouse_menu_enabled() -> bool {
+    std::env::var("KAKU_DEBUG_MOUSE_MENU").is_ok()
+}
+
+fn debug_mouse_menu_log(msg: &str) {
+    if debug_mouse_menu_enabled() {
+        log::info!("[mouse-menu] {msg}");
+    }
+}
+
 lazy_static::lazy_static! {
     static ref WINDOW_CLASS: Mutex<String> = Mutex::new(wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS.to_owned());
     static ref POSITION: Mutex<Option<GuiPosition>> = Mutex::new(None);
@@ -248,7 +258,10 @@ pub enum TermWindowNotif {
     },
     GetConfigOverrides(Sender<wezterm_dynamic::Value>),
     SetConfigOverrides(wezterm_dynamic::Value),
-    CancelOverlayForPane(PaneId),
+    CancelOverlayForPane {
+        pane_id: PaneId,
+        overlay_pane_id: Option<PaneId>,
+    },
     CancelOverlayForTab {
         tab_id: TabId,
         pane_id: Option<PaneId>,
@@ -1336,8 +1349,11 @@ impl TermWindow {
                     self.config_was_reloaded_silently();
                 }
             }
-            TermWindowNotif::CancelOverlayForPane(pane_id) => {
-                self.cancel_overlay_for_pane(pane_id);
+            TermWindowNotif::CancelOverlayForPane {
+                pane_id,
+                overlay_pane_id,
+            } => {
+                self.cancel_overlay_for_pane_if_matches(pane_id, overlay_pane_id);
             }
             TermWindowNotif::CancelOverlayForTab { tab_id, pane_id } => {
                 self.cancel_overlay_for_tab(tab_id, pane_id);
@@ -2594,13 +2610,22 @@ impl TermWindow {
         let mux_window_id = self.mux_window_id;
         let window = self.window.as_ref().unwrap().clone();
 
+        // Detect right-click context: if triggered by a right mouse press,
+        // scope the overlay to the clicked pane and ignore the initial mouse event
+        let right_click_context = matches!(
+            self.current_mouse_event.as_ref().map(|event| &event.kind),
+            Some(MouseEventKind::Press(MousePress::Right))
+        );
+        let pane_scoped = right_click_context;
+        let ignore_initial_mouse_event = right_click_context;
+
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
             Some(tab) => tab,
             None => return,
         };
 
-        let pane = match self.get_active_pane_or_overlay() {
+        let pane = match tab.get_active_pane() {
             Some(pane) => pane,
             None => return,
         };
@@ -2641,17 +2666,41 @@ impl TermWindow {
             let win = window.clone();
             win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
                 let mux = Mux::get();
-                if let Some(tab) = mux.get_tab(tab_id) {
+                if pane_scoped {
+                    if let Some(pane) = mux.get_pane(pane_id) {
+                        let window = window.clone();
+                        let (overlay, future) =
+                            start_overlay_pane(term_window, &pane, move |_pane_id, term| {
+                                launcher(
+                                    args,
+                                    term,
+                                    window,
+                                    initial_choice_idx,
+                                    ignore_initial_mouse_event,
+                                )
+                            });
+
+                        term_window.assign_overlay_for_pane(pane_id, overlay);
+                        promise::spawn::spawn(future).detach();
+                    }
+                } else if let Some(tab) = mux.get_tab(tab_id) {
                     let window = window.clone();
                     let (overlay, future) =
                         start_overlay(term_window, &tab, move |_tab_id, term| {
-                            launcher(args, term, window, initial_choice_idx)
+                            launcher(
+                                args,
+                                term,
+                                window,
+                                initial_choice_idx,
+                                ignore_initial_mouse_event,
+                            )
                         });
 
                     term_window.assign_overlay(tab_id, overlay);
                     promise::spawn::spawn(future).detach();
                 }
             })));
+            win.invalidate();
         })
         .detach();
     }
@@ -3812,6 +3861,33 @@ impl TermWindow {
         window.notify(TermWindowNotif::CancelOverlayForTab { tab_id, pane_id });
     }
 
+    fn cancel_overlay_for_pane_if_matches(
+        &mut self,
+        pane_id: PaneId,
+        overlay_pane_id: Option<PaneId>,
+    ) {
+        if let Some(expected_overlay_pane_id) = overlay_pane_id {
+            let current_overlay_pane_id = self
+                .pane_state(pane_id)
+                .overlay
+                .as_ref()
+                .map(|overlay| overlay.pane.pane_id());
+
+            if current_overlay_pane_id != Some(expected_overlay_pane_id) {
+                debug_mouse_menu_log(&format!(
+                    "cancel_overlay_for_pane_if_matches skipped pane_id={pane_id} expected_overlay_pane_id={expected_overlay_pane_id} current_overlay_pane_id={current_overlay_pane_id:?}"
+                ));
+                return;
+            }
+
+            debug_mouse_menu_log(&format!(
+                "cancel_overlay_for_pane_if_matches matched pane_id={pane_id} overlay_pane_id={expected_overlay_pane_id}"
+            ));
+        }
+
+        self.cancel_overlay_for_pane(pane_id);
+    }
+
     fn cancel_overlay_for_pane(&mut self, pane_id: PaneId) {
         if let Some(overlay) = self.pane_state(pane_id).overlay.take() {
             // Ungh, when I built the CopyOverlay, its pane doesn't get
@@ -3828,7 +3904,21 @@ impl TermWindow {
     }
 
     pub fn schedule_cancel_overlay_for_pane(window: Window, pane_id: PaneId) {
-        window.notify(TermWindowNotif::CancelOverlayForPane(pane_id));
+        window.notify(TermWindowNotif::CancelOverlayForPane {
+            pane_id,
+            overlay_pane_id: None,
+        });
+    }
+
+    pub fn schedule_cancel_overlay_for_pane_if_matches(
+        window: Window,
+        pane_id: PaneId,
+        overlay_pane_id: PaneId,
+    ) {
+        window.notify(TermWindowNotif::CancelOverlayForPane {
+            pane_id,
+            overlay_pane_id: Some(overlay_pane_id),
+        });
     }
 
     pub fn assign_overlay_for_pane(&mut self, pane_id: PaneId, pane: Arc<dyn Pane>) {

@@ -186,6 +186,7 @@ struct LauncherState {
     labels: Vec<String>,
     alphabet: String,
     selection: String,
+    ignore_initial_mouse_event: bool,
     always_fuzzy: bool,
 }
 
@@ -504,6 +505,11 @@ impl LauncherState {
 
     fn run_loop(&mut self, term: &mut TermWizTerminal) -> anyhow::Result<()> {
         while let Ok(Some(event)) = term.poll_input(None) {
+            // Ignore the first mouse event when menu appears under cursor (right-click)
+            if matches!(event, InputEvent::Mouse(_)) && self.ignore_initial_mouse_event {
+                self.ignore_initial_mouse_event = false;
+                continue;
+            }
             match event {
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char(c),
@@ -649,6 +655,7 @@ pub fn launcher(
     mut term: TermWizTerminal,
     window: ::window::Window,
     initial_choice_idx: usize,
+    ignore_initial_mouse_event: bool,
 ) -> anyhow::Result<()> {
     let filtering = args.flags.contains(LauncherFlags::FUZZY);
     let mut state = LauncherState {
@@ -666,6 +673,7 @@ pub fn launcher(
         labels: vec![],
         selection: String::new(),
         alphabet: args.alphabet.clone(),
+        ignore_initial_mouse_event,
         always_fuzzy: filtering,
     };
 
