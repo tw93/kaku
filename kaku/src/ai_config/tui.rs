@@ -386,10 +386,7 @@ fn extract_codex_fields(raw: &str) -> Vec<FieldEntry> {
     let auth_path = config::HOME_DIR.join(".codex").join("auth.json");
     if let Ok(auth_raw) = std::fs::read_to_string(&auth_path) {
         if let Ok(auth) = serde_json::from_str::<serde_json::Value>(&auth_raw) {
-            let auth_mode = auth
-                .get("auth_mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let auth_mode = auth.get("auth_mode").and_then(|v| v.as_str()).unwrap_or("");
             if !auth_mode.is_empty() {
                 fields.push(FieldEntry {
                     key: "Auth".into(),
@@ -527,10 +524,7 @@ fn extract_opencode_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
 
                     let status = match auth_type.as_str() {
                         "api" => {
-                            let key = entry
-                                .get("key")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
                             mask_key(key)
                         }
                         "oauth" => "✓ connected".into(),
@@ -1050,9 +1044,7 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
 
             if let Some(ek) = env_key {
                 let obj = parsed.as_object_mut().context("root is not object")?;
-                let env = obj
-                    .entry("env")
-                    .or_insert_with(|| serde_json::json!({}));
+                let env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
                 if let Some(env_obj) = env.as_object_mut() {
                     if new_val == "—" || new_val.is_empty() {
                         env_obj.remove(ek);
