@@ -1,8 +1,9 @@
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1679,7 +1680,7 @@ fn sync_kaku_theme() -> anyhow::Result<String> {
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)
+    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .context("enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
@@ -1688,7 +1689,7 @@ pub fn run() -> anyhow::Result<()> {
     let result = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode().context("disable raw mode")?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)
         .context("leave alternate screen")?;
     terminal.show_cursor().context("show cursor")?;
 
@@ -1704,6 +1705,7 @@ fn run_loop(
 
         match event::read().context("read event")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                app.status_msg = None;
                 if app.selecting {
                     match key.code {
                         KeyCode::Enter => app.confirm_select(),
@@ -1750,6 +1752,11 @@ fn run_loop(
                     _ => {}
                 }
             }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => app.move_up(),
+                MouseEventKind::ScrollDown => app.move_down(),
+                _ => {}
+            },
             _ => {}
         }
 
