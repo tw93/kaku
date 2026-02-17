@@ -294,10 +294,195 @@ fn mask_key(val: &str) -> String {
     if val.is_empty() {
         return "—".into();
     }
-    if val.len() <= 8 {
+    if val.len() <= 12 {
         return "****".into();
     }
-    format!("{}...****", &val[..8])
+    // Show first 12 chars and last 4 chars
+    format!("{}...{}", &val[..12], &val[val.len() - 4..])
+}
+
+/// Get OpenAI account email from JWT token in auth.json
+fn get_opencode_openai_account(entry: &serde_json::Value) -> Option<String> {
+    let token = entry.get("access")?.as_str()?;
+
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Base64 URL-safe decode payload (add padding if needed)
+    let mut payload = parts[1].to_string();
+    while payload.len() % 4 != 0 {
+        payload.push('=');
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(&payload)
+        .ok()?;
+    let jwt_data: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    // OpenAI JWT payload contains email in custom claim
+    jwt_data
+        .get("https://api.openai.com/profile")?
+        .get("email")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Get Google account email by matching refresh token with antigravity-accounts.json
+fn get_opencode_google_account(entry: &serde_json::Value) -> Option<String> {
+    let refresh_token = entry.get("refresh")?.as_str()?;
+
+    // Extract project ID from refresh token (format: "token|project-id")
+    let project_id = if let Some(pos) = refresh_token.rfind('|') {
+        &refresh_token[pos + 1..]
+    } else {
+        return None;
+    };
+
+    let accounts_path = config::HOME_DIR
+        .join(".config")
+        .join("opencode")
+        .join("antigravity-accounts.json");
+
+    let raw = std::fs::read_to_string(&accounts_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    // Find account with matching project ID
+    let accounts = parsed.get("accounts")?.as_array()?;
+    for account in accounts {
+        if account.get("projectId")?.as_str() == Some(project_id) {
+            return account.get("email")?.as_str().map(|s| s.to_string());
+        }
+    }
+
+    None
+}
+
+/// Get GitHub Copilot username from gh auth status
+fn get_opencode_github_copilot_account() -> Option<String> {
+    get_copilot_account()
+}
+
+/// Get Gemini account email from google_accounts.json
+fn get_gemini_account() -> Option<String> {
+    let path = config::HOME_DIR
+        .join(".gemini")
+        .join("google_accounts.json");
+
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    // Extract "active" field
+    parsed
+        .get("active")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Get Codex account email from JWT token in auth.json
+fn get_codex_account() -> Option<String> {
+    let auth_path = config::HOME_DIR.join(".codex").join("auth.json");
+    let raw = std::fs::read_to_string(&auth_path).ok()?;
+    let auth_json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    // Extract access_token from tokens object
+    let token = auth_json
+        .get("tokens")?
+        .get("access_token")?
+        .as_str()?;
+
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Base64 URL-safe decode payload (add padding if needed)
+    let mut payload = parts[1].to_string();
+    while payload.len() % 4 != 0 {
+        payload.push('=');
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(&payload)
+        .ok()?;
+    let jwt_data: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    // OpenAI JWT payload contains email in custom claim
+    jwt_data
+        .get("https://api.openai.com/profile")?
+        .get("email")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Get full API Key from auth.json for OpenCode provider
+fn get_opencode_api_key(provider_name: &str) -> Option<String> {
+    let auth_path = config::HOME_DIR
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("auth.json");
+
+    let raw = std::fs::read_to_string(&auth_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    parsed
+        .get(provider_name)?
+        .get("key")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Get GitHub Copilot username from gh CLI
+fn get_copilot_account() -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args(["api", "user", "-q", ".login"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Get Claude Code account email from claude auth status
+fn get_claude_code_account() -> Option<String> {
+    let output = std::process::Command::new("claude")
+        .args(["auth", "status"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json_str = String::from_utf8(output.stdout).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+
+    // Extract email from auth status JSON
+    parsed.get("email")?.as_str().map(|s| s.to_string())
+}
+
+/// Format auth status, with account fallback to auth method
+fn format_auth_status(account: Option<String>, fallback_method: &str) -> String {
+    match account {
+        Some(acc) if !acc.is_empty() => format!("✓ {}", acc),
+        _ => format!("✓ {}", fallback_method),
+    }
 }
 
 /// Fetch models.dev data, cached to ~/.cache/kaku/models.json.
@@ -432,9 +617,10 @@ fn extract_claude_code_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     // Auth status: Claude Code uses OAuth; statsig dir indicates active session
     let statsig_dir = config::HOME_DIR.join(".claude").join("statsig");
     if statsig_dir.exists() {
+        let account = get_claude_code_account();
         fields.push(FieldEntry {
             key: "Auth".into(),
-            value: "✓ connected (oauth)".into(),
+            value: format_auth_status(account, "oauth"),
             options: vec![],
             editable: false,
         });
@@ -518,9 +704,10 @@ fn extract_codex_fields(raw: &str) -> Vec<FieldEntry> {
         if let Ok(auth) = serde_json::from_str::<serde_json::Value>(&auth_raw) {
             let auth_mode = auth.get("auth_mode").and_then(|v| v.as_str()).unwrap_or("");
             if !auth_mode.is_empty() {
+                let account = get_codex_account();
                 fields.push(FieldEntry {
                     key: "Auth".into(),
-                    value: format!("✓ connected ({})", auth_mode),
+                    value: format_auth_status(account, auth_mode),
                     options: vec![],
                     editable: false,
                 });
@@ -652,9 +839,10 @@ fn extract_gemini_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         .unwrap_or("");
 
     if !auth_type.is_empty() {
+        let account = get_gemini_account();
         fields.push(FieldEntry {
             key: "Auth".into(),
-            value: format!("✓ connected ({})", auth_type),
+            value: format_auth_status(account, auth_type),
             options: vec![],
             editable: false,
         });
@@ -711,9 +899,10 @@ fn extract_copilot_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     // Copilot authenticates via GitHub OAuth; session files indicate auth
     let session_dir = config::HOME_DIR.join(".copilot").join("session-state");
     if session_dir.exists() {
+        let account = get_copilot_account();
         fields.push(FieldEntry {
             key: "Auth".into(),
-            value: "✓ connected (github)".into(),
+            value: format_auth_status(account, "github"),
             options: vec![],
             editable: false,
         });
@@ -821,15 +1010,23 @@ fn extract_opencode_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
                             let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
                             format!("✓ {}", mask_key(key))
                         }
-                        "oauth" => "✓ connected".into(),
+                        "oauth" => {
+                            let account = match name.as_str() {
+                                "openai" => get_opencode_openai_account(entry),
+                                "google" => get_opencode_google_account(entry),
+                                "github-copilot" => get_opencode_github_copilot_account(),
+                                _ => None,
+                            };
+                            format_auth_status(account, "oauth")
+                        }
                         _ => auth_type.clone(),
                     };
 
                     fields.push(FieldEntry {
                         key: name.clone(),
-                        value: format!("{} ({})", status, auth_type),
+                        value: status,
                         options: vec![],
-                        editable: false,
+                        editable: auth_type == "api",  // API keys are editable, OAuth is not
                     });
                 }
             }
@@ -1037,6 +1234,15 @@ fn extract_openclaw_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         }
     }
 
+    // Fallback: if no providers defined, collect models from agents.defaults.models
+    if all_model_ids.is_empty() {
+        if let Some(agent_models) = defaults.get("models").and_then(|m| m.as_object()) {
+            for model_key in agent_models.keys() {
+                all_model_ids.push(model_key.clone());
+            }
+        }
+    }
+
     let mut fields = vec![FieldEntry {
         key: "Primary Model".into(),
         value: if primary.is_empty() {
@@ -1095,6 +1301,7 @@ struct App {
     focus: Focus,
     editing: bool,
     edit_buf: String,
+    edit_cursor: usize,
     selecting: bool,
     select_index: usize,
     select_options: Vec<String>,
@@ -1116,6 +1323,7 @@ impl App {
             focus: Focus::ToolList,
             editing: false,
             edit_buf: String::new(),
+            edit_cursor: 0,
             selecting: false,
             select_index: 0,
             select_options: Vec::new(),
@@ -1177,10 +1385,53 @@ impl App {
         if self.field_index >= tool.fields.len() {
             return;
         }
-        if !tool.fields[self.field_index].editable {
+        let field = &tool.fields[self.field_index];
+
+        // Show OAuth re-authentication command for non-editable auth fields
+        if !field.editable {
+            if field.key == "Auth" || (field.value.starts_with('✓') && !field.key.contains(" ▸ ")) {
+                let cmd = match tool.tool {
+                    Tool::OpenCode => Some("opencode auth"),
+                    Tool::Gemini => Some("gemini auth login"),
+                    Tool::Codex => Some("codex auth login"),
+                    Tool::Copilot => Some("gh auth login"),
+                    Tool::ClaudeCode => Some("claude auth login"),
+                    Tool::OpenClaw => None,
+                };
+
+                if let Some(auth_cmd) = cmd {
+                    // Execute auth command in a new Terminal window (macOS)
+                    let script = format!("tell application \"Terminal\" to do script \"{}\"", auth_cmd);
+                    match std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(&script)
+                        .spawn()
+                    {
+                        Ok(_) => self.status_msg = Some("Opening authentication in new terminal window...".into()),
+                        Err(_) => self.status_msg = Some(format!("Failed to open terminal. Run '{}' manually", auth_cmd)),
+                    }
+                } else {
+                    self.status_msg = Some("OpenClaw uses API keys, check config file".to_string());
+                }
+            } else if field.value.starts_with('✓') {
+                // OAuth provider in OpenCode auth.json (e.g., "openai", "google", "github-copilot")
+                let provider = field.key.as_str();
+                let auth_cmd = format!("opencode auth add {}", provider);
+
+                // Execute auth command in a new Terminal window (macOS)
+                let script = format!("tell application \"Terminal\" to do script \"{}\"", auth_cmd);
+                match std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(&script)
+                    .spawn()
+                {
+                    Ok(_) => self.status_msg = Some("Opening authentication in new terminal window...".into()),
+                    Err(_) => self.status_msg = Some(format!("Failed to open terminal. Run '{}' manually", auth_cmd)),
+                }
+            }
             return;
         }
-        let field = &tool.fields[self.field_index];
+
         if !field.options.is_empty() {
             self.selecting = true;
             self.select_options = field.options.clone();
@@ -1193,12 +1444,21 @@ impl App {
             return;
         }
         self.editing = true;
-        // Clear buffer for placeholder "—" and masked API Key values
-        self.edit_buf = if field.value == "—" || field.key.contains("API Key") {
+
+        // For API Key fields, load the full key from auth.json (OpenCode) or config
+        self.edit_buf = if field.value == "—" {
+            // Empty placeholder
             String::new()
+        } else if field.key.contains("API Key") && !field.key.contains(" ▸ ") {
+            // OpenCode provider API Key from opencode.json - keep masked value behavior
+            String::new()
+        } else if tool.tool == Tool::OpenCode && !field.key.contains(" ▸ ") && field.editable && field.value.starts_with("✓") {
+            // OpenCode auth.json API Key - load full key (editable API type fields)
+            get_opencode_api_key(&field.key).unwrap_or_else(String::new)
         } else {
             field.value.clone()
         };
+        self.edit_cursor = self.edit_buf.len();  // Start cursor at end
         self.focus = Focus::Editor;
     }
 
@@ -1280,14 +1540,6 @@ impl App {
         self.editing = false;
         self.selecting = false;
         self.focus = Focus::ToolList;
-    }
-
-    fn sync_theme(&mut self) {
-        match sync_kaku_theme() {
-            Ok(msg) => self.status_msg = Some(msg),
-            Err(e) => self.status_msg = Some(format!("Theme sync failed: {}", e)),
-        }
-        self.tools = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
     }
 
     fn open_config(&self) {
@@ -1465,6 +1717,45 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
                     }
                 }
             } else {
+                // Auth.json provider API keys (field_key is provider name like "kimi-for-coding")
+                let auth_path = config::HOME_DIR
+                    .join(".local")
+                    .join("share")
+                    .join("opencode")
+                    .join("auth.json");
+
+                if !auth_path.exists() {
+                    return Ok(());
+                }
+
+                let auth_raw = std::fs::read_to_string(&auth_path)
+                    .with_context(|| format!("read {}", auth_path.display()))?;
+                let mut auth_parsed: serde_json::Value = serde_json::from_str(&auth_raw)
+                    .with_context(|| format!("parse {}", auth_path.display()))?;
+
+                if let Some(auth_obj) = auth_parsed.as_object_mut() {
+                    if let Some(provider) = auth_obj.get_mut(field_key) {
+                        if let Some(provider_obj) = provider.as_object_mut() {
+                            // Check if this is an API type provider
+                            if provider_obj.get("type").and_then(|v| v.as_str()) == Some("api") {
+                                if new_val == "—" || new_val.is_empty() {
+                                    provider_obj.remove("key");
+                                } else {
+                                    provider_obj.insert(
+                                        "key".to_string(),
+                                        serde_json::Value::String(new_val.to_string()),
+                                    );
+                                }
+
+                                // Save to auth.json
+                                let output = serde_json::to_string_pretty(&auth_parsed)
+                                    .context("serialize auth.json")?;
+                                std::fs::write(&auth_path, output.as_bytes())
+                                    .with_context(|| format!("write {}", auth_path.display()))?;
+                            }
+                        }
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1645,38 +1936,6 @@ fn save_codex_field(field_key: &str, new_val: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sync_kaku_theme() -> anyhow::Result<String> {
-    let opencode_dir = config::HOME_DIR.join(".config").join("opencode");
-    let themes_dir = opencode_dir.join("themes");
-    config::create_user_owned_dirs(&opencode_dir).context("create opencode config dir")?;
-    config::create_user_owned_dirs(&themes_dir).context("create opencode themes dir")?;
-
-    let theme_content = super::OPENCODE_THEME_JSON;
-    let theme_file = themes_dir.join("wezterm-match.json");
-    std::fs::write(&theme_file, theme_content).context("write opencode theme")?;
-
-    let config_path = opencode_dir.join("opencode.json");
-    if !config_path.exists() {
-        let config_content = "{\n  \"theme\": \"wezterm-match\"\n}\n";
-        std::fs::write(&config_path, config_content).context("write opencode config")?;
-    } else {
-        let raw = std::fs::read_to_string(&config_path).context("read opencode config")?;
-        let mut parsed: serde_json::Value = serde_json::from_str(&raw)
-            .or_else(|_| serde_json::from_str(&strip_jsonc_comments(&raw)))
-            .context("parse opencode config")?;
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.insert(
-                "theme".into(),
-                serde_json::Value::String("wezterm-match".into()),
-            );
-        }
-        let output = serde_json::to_string_pretty(&parsed).context("serialize")?;
-        std::fs::write(&config_path, output).context("write opencode config")?;
-    }
-
-    Ok("Kaku theme synced to OpenCode".into())
-}
-
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -1729,10 +1988,57 @@ fn run_loop(
                     match key.code {
                         KeyCode::Enter => app.confirm_edit(),
                         KeyCode::Esc => app.cancel_edit(),
-                        KeyCode::Backspace => {
-                            app.edit_buf.pop();
+                        KeyCode::Left => {
+                            if app.edit_cursor > 0 {
+                                app.edit_cursor -= 1;
+                            }
                         }
-                        KeyCode::Char(c) => app.edit_buf.push(c),
+                        KeyCode::Right => {
+                            if app.edit_cursor < app.edit_buf.len() {
+                                app.edit_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.edit_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.edit_cursor = app.edit_buf.len();
+                        }
+                        KeyCode::Backspace => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) {
+                                // Cmd+Backspace (macOS) or Ctrl+Backspace - clear all
+                                app.edit_buf.clear();
+                                app.edit_cursor = 0;
+                            } else if app.edit_cursor > 0 {
+                                // Regular backspace - delete char before cursor
+                                app.edit_buf.remove(app.edit_cursor - 1);
+                                app.edit_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if app.edit_cursor < app.edit_buf.len() {
+                                app.edit_buf.remove(app.edit_cursor);
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            // Handle Ctrl+U (clear line) - macOS Cmd+Backspace may also send this
+                            if (key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER))
+                                && c == 'u'
+                            {
+                                app.edit_buf.clear();
+                                app.edit_cursor = 0;
+                            }
+                            // Ignore other control characters
+                            else if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::SUPER)
+                            {
+                                // Insert char at cursor position
+                                app.edit_buf.insert(app.edit_cursor, c);
+                                app.edit_cursor += 1;
+                            }
+                        }
                         _ => {}
                     }
                     continue;
@@ -1746,7 +2052,6 @@ fn run_loop(
                     KeyCode::Up | KeyCode::Char('k') => app.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_down(),
                     KeyCode::Enter => app.start_edit(),
-                    KeyCode::Char('t') => app.sync_theme(),
                     KeyCode::Char('o') => app.open_config(),
                     KeyCode::Char('r') => app.refresh_models(),
                     _ => {}
@@ -1921,8 +2226,8 @@ fn render_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(" Navigate  ", Style::default().fg(MUTED())),
             Span::styled("Enter", Style::default().fg(PURPLE())),
             Span::styled(" Edit  ", Style::default().fg(MUTED())),
-            Span::styled("t", Style::default().fg(PURPLE())),
-            Span::styled(" Sync Theme  ", Style::default().fg(MUTED())),
+            Span::styled("Shift", Style::default().fg(PURPLE())),
+            Span::styled(" Select/Copy  ", Style::default().fg(MUTED())),
             Span::styled("o", Style::default().fg(PURPLE())),
             Span::styled(" Open File  ", Style::default().fg(MUTED())),
             Span::styled("r", Style::default().fg(PURPLE())),
@@ -1942,8 +2247,9 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     }
     let field = &tool.fields[app.field_index];
 
-    let popup_width = 50u16.min(area.width.saturating_sub(4));
-    let popup_height = 5u16;
+    // Compact popup - 80% width, fixed height (~3 lines of content + borders)
+    let popup_width = ((area.width as f32 * 0.8) as u16).min(area.width.saturating_sub(4));
+    let popup_height = 5u16.min(area.height.saturating_sub(4));
     let popup = Rect::new(
         (area.width.saturating_sub(popup_width)) / 2,
         (area.height.saturating_sub(popup_height)) / 2,
@@ -1957,7 +2263,11 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .title(Line::from(vec![
             Span::styled(" Edit: ", Style::default().fg(PURPLE())),
             Span::styled(&field.key, Style::default().fg(TEXT())),
-            Span::raw(" "),
+            Span::styled("  ", Style::default()),
+            Span::styled("Enter", Style::default().fg(PURPLE())),
+            Span::styled(": Save  ", Style::default().fg(MUTED())),
+            Span::styled("Esc", Style::default().fg(PURPLE())),
+            Span::styled(": Cancel ", Style::default().fg(MUTED())),
         ]))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(PURPLE()))
@@ -1966,11 +2276,43 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled(&app.edit_buf, Style::default().fg(TEXT())),
-        Span::styled("▏", Style::default().fg(PURPLE())),
-    ]));
-    frame.render_widget(input, inner.inner(Margin::new(1, 1)));
+    // Wrap long text to multiple lines for better visibility
+    let content_area = inner.inner(Margin::new(1, 0));
+
+    // Build line with cursor at the correct position
+    let line = if app.edit_buf.is_empty() {
+        // Empty buffer - show a space with inverted background as cursor
+        Line::from(Span::styled(" ", Style::default().bg(PURPLE())))
+    } else {
+        let cursor_pos = app.edit_cursor;
+        let before = &app.edit_buf[..cursor_pos];
+        let after = &app.edit_buf[cursor_pos..];
+
+        if cursor_pos >= app.edit_buf.len() {
+            // Cursor at end - show space with inverted background
+            Line::from(vec![
+                Span::styled(before, Style::default().fg(TEXT())),
+                Span::styled(" ", Style::default().bg(PURPLE())),
+            ])
+        } else {
+            // Cursor in middle - highlight current character with inverted colors
+            let mut chars = after.chars();
+            let current_char = chars.next().unwrap_or(' ');
+            let remaining = chars.as_str();
+
+            Line::from(vec![
+                Span::styled(before, Style::default().fg(TEXT())),
+                Span::styled(
+                    current_char.to_string(),
+                    Style::default().bg(PURPLE()).fg(BG()),
+                ),
+                Span::styled(remaining, Style::default().fg(TEXT())),
+            ])
+        }
+    };
+
+    let input = Paragraph::new(vec![line]).wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(input, content_area);
 }
 
 fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
