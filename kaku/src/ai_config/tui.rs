@@ -302,7 +302,7 @@ fn mask_key(val: &str) -> String {
 fn extract_claude_code_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     let model = json_str(val, "model");
 
-    vec![FieldEntry {
+    let mut fields = vec![FieldEntry {
         key: "Primary Model".into(),
         value: if model.is_empty() {
             "default".into()
@@ -311,7 +311,41 @@ fn extract_claude_code_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         },
         options: vec![],
         ..Default::default()
-    }]
+    }];
+
+    // Show env-based provider config if present (e.g. OpenRouter, Pipe AI, Kimi)
+    if let Some(env) = val.get("env").and_then(|e| e.as_object()) {
+        let base_url = env
+            .get("ANTHROPIC_BASE_URL")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let auth_token = env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .or_else(|| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !base_url.is_empty() {
+            fields.push(FieldEntry {
+                key: "Base URL".into(),
+                value: base_url,
+                options: vec![],
+                ..Default::default()
+            });
+        }
+        if !auth_token.is_empty() {
+            fields.push(FieldEntry {
+                key: "API Key".into(),
+                value: mask_key(&auth_token),
+                options: vec![],
+                ..Default::default()
+            });
+        }
+    }
+
+    fields
 }
 
 fn extract_codex_fields(raw: &str) -> Vec<FieldEntry> {
@@ -709,7 +743,7 @@ fn extract_openclaw_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
                     key: format!("{} ▸ Models", name),
                     value: models_display,
                     options: vec![],
-                    editable: false,
+                    ..Default::default()
                 });
             }
         }
@@ -1004,20 +1038,44 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
     match tool {
         Tool::Codex | Tool::Gemini | Tool::Copilot => return Ok(()),
         Tool::ClaudeCode => {
+            let env_key = match field_key {
+                "Base URL" => Some("ANTHROPIC_BASE_URL"),
+                "API Key" => Some("ANTHROPIC_AUTH_TOKEN"),
+                _ => None,
+            };
             let top_key = match field_key {
-                "Primary Model" => "model",
-                _ => return Ok(()),
+                "Primary Model" => Some("model"),
+                _ => None,
             };
 
-            if let Some(obj) = parsed.as_object_mut() {
-                if new_val == "—" || new_val.is_empty() {
-                    obj.remove(top_key);
-                } else {
-                    obj.insert(
-                        top_key.to_string(),
-                        serde_json::Value::String(new_val.to_string()),
-                    );
+            if let Some(ek) = env_key {
+                let obj = parsed.as_object_mut().context("root is not object")?;
+                let env = obj
+                    .entry("env")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(env_obj) = env.as_object_mut() {
+                    if new_val == "—" || new_val.is_empty() {
+                        env_obj.remove(ek);
+                    } else {
+                        env_obj.insert(
+                            ek.to_string(),
+                            serde_json::Value::String(new_val.to_string()),
+                        );
+                    }
                 }
+            } else if let Some(tk) = top_key {
+                if let Some(obj) = parsed.as_object_mut() {
+                    if new_val == "—" || new_val.is_empty() {
+                        obj.remove(tk);
+                    } else {
+                        obj.insert(
+                            tk.to_string(),
+                            serde_json::Value::String(new_val.to_string()),
+                        );
+                    }
+                }
+            } else {
+                return Ok(());
             }
         }
         Tool::OpenCode => {
