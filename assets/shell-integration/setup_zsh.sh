@@ -297,33 +297,25 @@ fi
 ssh() {
     local -a extra_opts=()
 
-    # Fix TERM for kaku terminal
-    if [[ "\$TERM" == "kaku" ]]; then
-        extra_opts+=(-o "SetEnv=TERM=xterm-256color")
-    fi
-
-    # 1Password SSH agent fix: auto-add IdentitiesOnly=yes
+    # 1Password SSH agent fix: auto-add IdentitiesOnly=yes to prevent
+    # "Too many authentication failures" when 1Password offers all stored keys.
+    # Set KAKU_SSH_SKIP_1PASSWORD_FIX=1 to disable.
     if [[ -z "\${KAKU_SSH_SKIP_1PASSWORD_FIX-}" ]]; then
         local sock="\${SSH_AUTH_SOCK:-}"
         if [[ "\$sock" == *1password* || "\$sock" == *2BUA8C4S2C* ]]; then
-            # Check user hasn't already set -o IdentitiesOnly
             local has_identitiesonly=false prev=""
             for arg in "\$@"; do
                 [[ "\$prev" == "-o" && "\$arg" == IdentitiesOnly=* ]] && has_identitiesonly=true
                 prev="\$arg"
             done
-            if ! \$has_identitiesonly; then
-                extra_opts+=(-o "IdentitiesOnly=yes")
-            fi
+            \$has_identitiesonly || extra_opts+=(-o "IdentitiesOnly=yes")
         fi
     fi
 
     if [[ "\$TERM" == "kaku" ]]; then
         TERM=xterm-256color command ssh "\${extra_opts[@]}" "\$@"
-    elif (( \${#extra_opts} > 0 )); then
-        command ssh "\${extra_opts[@]}" "\$@"
     else
-        command ssh "\$@"
+        command ssh "\${extra_opts[@]}" "\$@"
     fi
 }
 EOF
