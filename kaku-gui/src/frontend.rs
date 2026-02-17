@@ -449,12 +449,17 @@ impl GuiFrontEnd {
         let mux = Mux::get();
         let pane_id = mux.iter_panes().into_iter().find_map(|pane| {
             let pane_tty = pane.tty_name()?;
-            if tty_candidates.iter().any(|candidate| candidate == &pane_tty) {
+            if tty_candidates
+                .iter()
+                .any(|candidate| candidate == &pane_tty)
+            {
                 return Some(pane.pane_id());
             }
 
             if let Some(target_basename) = target_basename.as_deref() {
-                let pane_basename = Path::new(&pane_tty).file_name().and_then(|name| name.to_str());
+                let pane_basename = Path::new(&pane_tty)
+                    .file_name()
+                    .and_then(|name| name.to_str());
                 if pane_basename == Some(target_basename) {
                     return Some(pane.pane_id());
                 }
