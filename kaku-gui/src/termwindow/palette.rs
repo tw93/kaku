@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use termwiz::nerdfonts::NERD_FONTS;
 use wezterm_dynamic::{FromDynamic, ToDynamic};
+use wezterm_term::input::{MouseButton, MouseEventKind};
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent};
 use window::color::LinearRgba;
 use window::Modifiers;
@@ -29,6 +30,12 @@ use window::Modifiers;
 struct MatchResults {
     selection: String,
     matches: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaletteKind {
+    Command,
+    GitBranch,
 }
 
 pub struct CommandPalette {
@@ -39,6 +46,7 @@ pub struct CommandPalette {
     top_row: RefCell<usize>,
     max_rows_on_screen: RefCell<usize>,
     commands: Vec<ExpandedCommand>,
+    kind: PaletteKind,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -216,6 +224,27 @@ fn compute_matches(selection: &str, commands: &[ExpandedCommand]) -> Vec<usize> 
 }
 
 impl CommandPalette {
+    pub fn with_commands(commands: Vec<ExpandedCommand>) -> Self {
+        Self::with_kind(commands, PaletteKind::Command)
+    }
+
+    fn with_kind(commands: Vec<ExpandedCommand>, kind: PaletteKind) -> Self {
+        Self {
+            element: RefCell::new(None),
+            selection: RefCell::new(String::new()),
+            commands,
+            matches: RefCell::new(None),
+            selected_row: RefCell::new(0),
+            top_row: RefCell::new(0),
+            max_rows_on_screen: RefCell::new(0),
+            kind,
+        }
+    }
+
+    pub fn git_branch_selector(commands: Vec<ExpandedCommand>) -> Self {
+        Self::with_kind(commands, PaletteKind::GitBranch)
+    }
+
     pub fn new(term_window: &mut TermWindow) -> Self {
         // Showing the CopyMode actions in the palette is useless
         // if the CopyOverlay isn't active, so figure out if that
@@ -234,15 +263,7 @@ impl CommandPalette {
 
         let commands = build_commands(GuiWin::new(term_window), mux_pane, filter_copy_mode);
 
-        Self {
-            element: RefCell::new(None),
-            selection: RefCell::new(String::new()),
-            commands,
-            matches: RefCell::new(None),
-            selected_row: RefCell::new(0),
-            top_row: RefCell::new(0),
-            max_rows_on_screen: RefCell::new(0),
-        }
+        Self::with_commands(commands)
     }
 
     fn compute(
@@ -253,6 +274,7 @@ impl CommandPalette {
         max_rows_on_screen: usize,
         selected_row: usize,
         top_row: usize,
+        kind: PaletteKind,
     ) -> anyhow::Result<Vec<ComputedElement>> {
         let font = term_window
             .fonts
@@ -269,20 +291,47 @@ impl CommandPalette {
         let border = term_window.get_os_border();
         let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32;
 
-        let mut elements =
-            vec![
-                Element::new(&font, ElementContent::Text(format!("> {selection}_")))
-                    .colors(ElementColors {
-                        border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
-                        text: term_window
-                            .config
-                            .command_palette_fg_color
-                            .to_linear()
-                            .into(),
-                    })
-                    .display(DisplayType::Block),
-            ];
+        let selection_label = match kind {
+            PaletteKind::Command => format!("> {selection}_"),
+            PaletteKind::GitBranch => {
+                if selection.is_empty() {
+                    "Search branches...".to_string()
+                } else {
+                    selection.to_string()
+                }
+            }
+        };
+
+        let selection_color: InheritableColor = match kind {
+            PaletteKind::Command => term_window
+                .config
+                .command_palette_fg_color
+                .to_linear()
+                .into(),
+            PaletteKind::GitBranch if selection.is_empty() => {
+                let fg = term_window.config.command_palette_fg_color.to_linear();
+                LinearRgba::with_components(fg.0, fg.1, fg.2, 0.5).into()
+            }
+            PaletteKind::GitBranch => term_window
+                .config
+                .command_palette_fg_color
+                .to_linear()
+                .into(),
+        };
+
+        let mut elements = vec![Element::new(&font, ElementContent::Text(selection_label))
+            .colors(ElementColors {
+                border: BorderColor::default(),
+                bg: LinearRgba::TRANSPARENT.into(),
+                text: selection_color,
+            })
+            .padding(BoxDimension {
+                left: Dimension::Cells(0.5),
+                right: Dimension::Cells(0.5),
+                top: Dimension::Cells(0.),
+                bottom: Dimension::Cells(0.),
+            })
+            .display(DisplayType::Block)];
 
         for (display_idx, command) in matches
             .matches
@@ -292,10 +341,10 @@ impl CommandPalette {
             .skip(top_row)
             .take(max_rows_on_screen)
         {
-            let group = if command.menubar.is_empty() {
-                String::new()
-            } else {
+            let group = if kind == PaletteKind::Command && !command.menubar.is_empty() {
                 format!("{}: ", command.menubar.join(" | "))
+            } else {
+                String::new()
             };
 
             let icon = match &command.icon {
@@ -330,7 +379,9 @@ impl CommandPalette {
             };
 
             // DRY if the brief and doc are the same
-            let label = if command.doc.is_empty()
+            let label = if kind == PaletteKind::GitBranch {
+                command.brief.to_string()
+            } else if command.doc.is_empty()
                 || command.brief.to_ascii_lowercase() == command.doc.to_ascii_lowercase()
             {
                 format!("{group}{}", command.brief)
@@ -344,7 +395,24 @@ impl CommandPalette {
                 Element::new(&font, ElementContent::Text(label)),
             ];
 
-            if !command.keys.is_empty() {
+            if kind == PaletteKind::GitBranch && !command.doc.is_empty() {
+                row.push(
+                    Element::new(&font, ElementContent::Text(command.doc.to_string()))
+                        .float(Float::Right)
+                        .padding(BoxDimension {
+                            left: Dimension::Cells(1.),
+                            right: Dimension::Cells(0.75),
+                            top: Dimension::Cells(0.),
+                            bottom: Dimension::Cells(0.),
+                        })
+                        .zindex(10)
+                        .colors(ElementColors {
+                            border: BorderColor::default(),
+                            bg: label_bg.clone(),
+                            text: label_text.clone(),
+                        }),
+                );
+            } else if kind == PaletteKind::Command && !command.keys.is_empty() {
                 let mut keys = command.keys.clone();
 
                 keys.sort_by(|(a_mods, a_key), (b_mods, b_key)| {
@@ -444,7 +512,10 @@ impl CommandPalette {
         let size = term_window.terminal_size;
 
         // Avoid covering the entire width
-        let desired_width = (size.cols / 3).max(120).min(size.cols);
+        let desired_width = match kind {
+            PaletteKind::Command => (size.cols / 3).max(120).min(size.cols),
+            PaletteKind::GitBranch => (size.cols / 4).max(56).min(96).min(size.cols),
+        };
 
         // Center it
         let avail_pixel_width =
@@ -539,6 +610,101 @@ impl CommandPalette {
         Ok(vec![computed])
     }
 
+    fn activate_row(&self, selected_idx: usize, term_window: &mut TermWindow) -> bool {
+        let alias_idx = {
+            let matches = self.matches.borrow();
+            match matches
+                .as_ref()
+                .and_then(|results| results.matches.get(selected_idx))
+            {
+                Some(i) => *i,
+                None => return false,
+            }
+        };
+
+        let item = &self.commands[alias_idx];
+        if self.kind == PaletteKind::Command {
+            if let Err(err) = save_recent(item) {
+                log::error!("Error while saving recents: {err:#}");
+            }
+        }
+        term_window.cancel_modal();
+
+        if let Some(pane) = term_window.get_active_pane_or_overlay() {
+            if let Err(err) = term_window.perform_key_assignment(&pane, &item.action) {
+                log::error!("Error while performing {item:?}: {err:#}");
+            }
+        }
+
+        true
+    }
+
+    fn row_for_mouse_event(
+        &self,
+        event: &MouseEvent,
+        term_window: &mut TermWindow,
+    ) -> Option<usize> {
+        if self.element.borrow().is_none() || self.matches.borrow().is_none() {
+            if let Err(err) = self.computed_element(term_window) {
+                log::error!("Error while preparing palette for mouse hit test: {err:#}");
+                return None;
+            }
+        }
+
+        let elements = self.element.borrow();
+        let root = elements.as_ref()?.first()?;
+        let rows = match &root.content {
+            ComputedElementContent::Children(rows) => rows,
+            _ => return None,
+        };
+
+        let top_bar_height = if term_window.show_tab_bar && !term_window.config.tab_bar_at_bottom {
+            term_window.tab_bar_pixel_height().unwrap_or(0.)
+        } else {
+            0.
+        };
+        let (padding_left, padding_top) = term_window.padding_left_top();
+        let border = term_window.get_os_border();
+        let content_origin_x = padding_left + border.left.get() as f32;
+        let content_origin_y = top_bar_height + padding_top + border.top.get() as f32;
+
+        let cell_width = term_window.render_metrics.cell_size.width as f32;
+        let cell_height = term_window.render_metrics.cell_size.height as f32;
+
+        let mouse_x =
+            content_origin_x + (event.x as f32 * cell_width) + event.x_pixel_offset as f32;
+        let mouse_y =
+            content_origin_y + (event.y.max(0) as f32 * cell_height) + event.y_pixel_offset as f32;
+
+        if mouse_x < root.bounds.min_x()
+            || mouse_x > root.bounds.max_x()
+            || mouse_y < root.bounds.min_y()
+            || mouse_y > root.bounds.max_y()
+        {
+            return None;
+        }
+
+        let top_row = *self.top_row.borrow();
+        let max_matches = self
+            .matches
+            .borrow()
+            .as_ref()
+            .map(|m| m.matches.len())
+            .unwrap_or_else(|| self.commands.len());
+
+        for (visible_idx, row) in rows.iter().skip(1).enumerate() {
+            if mouse_y >= row.bounds.min_y() && mouse_y <= row.bounds.max_y() {
+                let selected_row = top_row + visible_idx;
+                if selected_row < max_matches {
+                    return Some(selected_row);
+                }
+                return None;
+            }
+        }
+
+        None
+    }
+
     fn updated_input(&self) {
         *self.selected_row.borrow_mut() = 0;
         *self.top_row.borrow_mut() = 0;
@@ -581,7 +747,26 @@ impl Modal for CommandPalette {
         false
     }
 
-    fn mouse_event(&self, _event: MouseEvent, _term_window: &mut TermWindow) -> anyhow::Result<()> {
+    fn mouse_event(&self, event: MouseEvent, term_window: &mut TermWindow) -> anyhow::Result<()> {
+        let selected_row = self.row_for_mouse_event(&event, term_window);
+
+        match event.kind {
+            MouseEventKind::Move => {
+                if let Some(row) = selected_row {
+                    if *self.selected_row.borrow() != row {
+                        *self.selected_row.borrow_mut() = row;
+                        term_window.invalidate_modal();
+                    }
+                }
+            }
+            MouseEventKind::Press if event.button == MouseButton::Left => {
+                if let Some(row) = selected_row {
+                    *self.selected_row.borrow_mut() = row;
+                    self.activate_row(row, term_window);
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -622,24 +807,7 @@ impl Modal for CommandPalette {
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 // Enter the selected character to the current pane
                 let selected_idx = *self.selected_row.borrow();
-                let alias_idx = match self.matches.borrow().as_ref() {
-                    None => return Ok(true),
-                    Some(results) => match results.matches.get(selected_idx) {
-                        Some(i) => *i,
-                        None => return Ok(true),
-                    },
-                };
-                let item = &self.commands[alias_idx];
-                if let Err(err) = save_recent(item) {
-                    log::error!("Error while saving recents: {err:#}");
-                }
-                term_window.cancel_modal();
-
-                if let Some(pane) = term_window.get_active_pane_or_overlay() {
-                    if let Err(err) = term_window.perform_key_assignment(&pane, &item.action) {
-                        log::error!("Error while performing {item:?}: {err:#}");
-                    }
-                }
+                self.activate_row(selected_idx, term_window);
                 return Ok(true);
             }
             _ => return Ok(false),
@@ -669,6 +837,9 @@ impl Modal for CommandPalette {
         if let Some(size) = term_window.config.command_palette_rows {
             max_rows_on_screen = max_rows_on_screen.min(size);
         }
+        if self.kind == PaletteKind::GitBranch {
+            max_rows_on_screen = max_rows_on_screen.min(12);
+        }
         *self.max_rows_on_screen.borrow_mut() = max_rows_on_screen;
 
         let rebuild_matches = results
@@ -692,6 +863,7 @@ impl Modal for CommandPalette {
                 max_rows_on_screen,
                 *self.selected_row.borrow(),
                 *self.top_row.borrow(),
+                self.kind,
             )?;
             self.element.borrow_mut().replace(element);
         }

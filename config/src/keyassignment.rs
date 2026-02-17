@@ -639,6 +639,8 @@ pub enum KeyAssignment {
     CharSelect(CharSelectArguments),
 
     ResetTerminal,
+    SwitchGitBranch,
+    SwitchToGitBranch(String),
     OpenUri(String),
     ActivateCommandPalette,
     ActivateWindow(usize),

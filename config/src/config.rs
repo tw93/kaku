@@ -1769,6 +1769,10 @@ fn default_initial_cols() -> u16 {
 
 pub fn default_hyperlink_rules() -> Vec<hyperlink::Rule> {
     vec![
+        // Treat prompt git-branch segments as clickable.
+        // Examples: ` main`, ` main`, ` main`.
+        // The full segment (icon + branch) is clickable so clicking the icon works too.
+        hyperlink::Rule::new(r"(?:||)\s*[^\s]+", "kaku://switch-git-branch").unwrap(),
         // First handle URLs wrapped with punctuation (i.e. brackets)
         // e.g. [http://foo] (http://foo) <http://foo>
         hyperlink::Rule::with_highlight(r"\((\w+://\S+)\)", "$1", 1).unwrap(),

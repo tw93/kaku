@@ -2049,6 +2049,22 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Shell"],
             icon: None,
         },
+        SwitchGitBranch => CommandDef {
+            brief: "Switch Git Branch".into(),
+            doc: "Show a branch picker for the active pane and switch branches".into(),
+            keys: vec![],
+            args: &[ArgType::ActivePane],
+            menubar: &["Shell"],
+            icon: Some("oct_git_branch"),
+        },
+        SwitchToGitBranch(branch) => CommandDef {
+            brief: format!("Switch Git branch to `{branch}`").into(),
+            doc: format!("Switch the active pane to git branch `{branch}`").into(),
+            keys: vec![],
+            args: &[ArgType::ActivePane],
+            menubar: &[],
+            icon: Some("oct_git_branch"),
+        },
         ActivateCommandPalette => CommandDef {
             brief: "Activate Command Palette".into(),
             doc: "Shows the command palette modal".into(),
@@ -2085,6 +2101,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         CloseCurrentPane { confirm: true },
         DetachDomain(SpawnTabDomain::CurrentPaneDomain),
         ResetTerminal,
+        SwitchGitBranch,
         // ----------------- Edit
         #[cfg(not(target_os = "macos"))]
         PasteFrom(ClipboardPasteSource::PrimarySelection),

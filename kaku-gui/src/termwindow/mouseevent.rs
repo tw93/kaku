@@ -264,8 +264,11 @@ impl super::TermWindow {
         }
 
         let prior_ui_item = self.last_ui_item.clone();
+        let modal_active = self.get_modal().is_some();
 
-        let ui_item = if matches!(self.current_mouse_capture, None | Some(MouseCapture::UI)) {
+        let ui_item = if !modal_active
+            && matches!(self.current_mouse_capture, None | Some(MouseCapture::UI))
+        {
             let ui_item = self.resolve_ui_item(&event);
 
             match (self.last_ui_item.take(), &ui_item) {
@@ -338,7 +341,8 @@ impl super::TermWindow {
         } else if matches!(
             self.current_mouse_capture,
             None | Some(MouseCapture::TerminalPane(_))
-        ) {
+        ) || modal_active
+        {
             self.mouse_event_terminal(
                 pane,
                 ClickPosition {
@@ -799,6 +803,8 @@ impl super::TermWindow {
         capture_mouse: bool,
     ) {
         let mut is_click_to_focus_pane = false;
+        let modal = self.get_modal();
+        let modal_active = modal.is_some();
 
         let ClickPosition {
             mut column,
@@ -900,7 +906,7 @@ impl super::TermWindow {
                     .pixel_height
                     .saturating_sub(resize_zone as usize);
 
-        if capture_mouse && !near_window_edge {
+        if !modal_active && capture_mouse && !near_window_edge {
             self.current_mouse_capture = Some(MouseCapture::TerminalPane(pane.pane_id()));
         }
 
@@ -1085,7 +1091,7 @@ impl super::TermWindow {
             }),
         };
 
-        if allow_action {
+        if !modal_active && allow_action {
             if let Some(mut event_trigger_type) = event_trigger_type {
                 self.current_event = Some(event_trigger_type.to_dynamic());
                 let mut modifiers = event.modifiers;
@@ -1160,6 +1166,19 @@ impl super::TermWindow {
             }
         }
 
+        let (mouse_x, mouse_y, mouse_x_pixel_offset, mouse_y_pixel_offset) = if modal_active {
+            // Modal overlays are anchored to the window content area, not a pane.
+            // Preserve the original pre-pane-adjusted coordinates for hit testing.
+            (
+                position.column,
+                position.row.max(0),
+                position.x_pixel_offset,
+                position.y_pixel_offset,
+            )
+        } else {
+            (column, row, x_pixel_offset, y_pixel_offset)
+        };
+
         let mouse_event = wezterm_term::MouseEvent {
             kind: match event.kind {
                 WMEK::Move => TMEK::Move,
@@ -1194,12 +1213,23 @@ impl super::TermWindow {
                     }
                 }
             },
-            x: column,
-            y: row,
-            x_pixel_offset,
-            y_pixel_offset,
+            x: mouse_x,
+            y: mouse_y,
+            x_pixel_offset: mouse_x_pixel_offset,
+            y_pixel_offset: mouse_y_pixel_offset,
             modifiers: event.modifiers,
         };
+
+        if let Some(modal) = modal {
+            if let Err(err) = modal.mouse_event(mouse_event, self) {
+                log::error!("Error while handling modal mouse event: {err:#}");
+            }
+            match event.kind {
+                WMEK::Move => {}
+                _ => context.invalidate(),
+            }
+            return;
+        }
 
         if allow_action
             && !(self.config.swallow_mouse_click_on_pane_focus && is_click_to_focus_pane)

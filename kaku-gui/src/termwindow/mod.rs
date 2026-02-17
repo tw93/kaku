@@ -2,6 +2,7 @@
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::colorease::ColorEase;
+use crate::commands::ExpandedCommand;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::{
@@ -56,7 +57,8 @@ use smol::Timer;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, LinkedList};
 use std::ops::Add;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -457,6 +459,12 @@ pub struct TabState {
     /// contents, we're overlaying a little internal application
     /// tab.  We'll also route input to it.
     pub overlay: Option<OverlayState>,
+}
+
+#[derive(Debug)]
+struct GitBranchEntry {
+    name: String,
+    is_current: bool,
 }
 
 /// Manages the state/queue of lua based event handlers.
@@ -2464,6 +2472,114 @@ impl TermWindow {
         Ok(())
     }
 
+    fn pane_current_working_dir_path(pane: &Arc<dyn Pane>) -> Option<PathBuf> {
+        pane.get_current_working_dir(CachePolicy::AllowStale)
+            .or_else(|| pane.get_current_working_dir(CachePolicy::FetchImmediate))
+            .and_then(|url| {
+                if url.scheme() == "file" {
+                    url.to_file_path().ok()
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn list_git_branches(cwd: &Path) -> anyhow::Result<Vec<GitBranchEntry>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .arg("for-each-ref")
+            .arg("--format=%(if)%(HEAD)%(then)*%(else) %(end)\t%(refname:short)")
+            .arg("refs/heads")
+            .output()
+            .context("failed to run git")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                anyhow::bail!("failed to read git branches");
+            }
+            anyhow::bail!("{stderr}");
+        }
+
+        let stdout = String::from_utf8(output.stdout).context("git output is not valid utf-8")?;
+        let mut branches = vec![];
+        for line in stdout.lines() {
+            let mut parts = line.splitn(2, '\t');
+            let marker = parts.next().unwrap_or_default();
+            let name = parts.next().unwrap_or_default().trim();
+            if name.is_empty() {
+                continue;
+            }
+            branches.push(GitBranchEntry {
+                name: name.to_string(),
+                is_current: marker.trim() == "*",
+            });
+        }
+
+        branches.sort_by(|a, b| {
+            b.is_current
+                .cmp(&a.is_current)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        if branches.is_empty() {
+            anyhow::bail!("no local git branches found");
+        }
+
+        Ok(branches)
+    }
+
+    fn show_git_branch_selector(&mut self, pane: &Arc<dyn Pane>) {
+        let cwd = match Self::pane_current_working_dir_path(pane) {
+            Some(cwd) => cwd,
+            None => {
+                self.show_toast("Unable to determine working directory".to_string());
+                return;
+            }
+        };
+
+        let branches = match Self::list_git_branches(&cwd) {
+            Ok(branches) => branches,
+            Err(err) => {
+                log::error!(
+                    "failed to load git branches from {}: {err:#}",
+                    cwd.display()
+                );
+                self.show_toast(format!("Git: {err}"));
+                return;
+            }
+        };
+
+        let mut commands = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let branch_name = branch.name;
+            commands.push(ExpandedCommand {
+                brief: branch_name.clone().into(),
+                doc: if branch.is_current {
+                    "current".into()
+                } else {
+                    "".into()
+                },
+                action: KeyAssignment::SwitchToGitBranch(branch_name),
+                keys: vec![],
+                menubar: &[],
+                icon: Some("oct_git_branch".into()),
+            });
+        }
+
+        let modal = crate::termwindow::palette::CommandPalette::git_branch_selector(commands);
+        self.set_modal(Rc::new(modal));
+    }
+
+    fn switch_to_git_branch(&mut self, pane: &Arc<dyn Pane>, branch: &str) -> anyhow::Result<()> {
+        let quoted = shlex::try_quote(branch)
+            .map_err(|err| anyhow!("failed to quote branch name `{branch}`: {err}"))?;
+        let command = format!("git switch -- {quoted} || git checkout -- {quoted}\n");
+        pane.writer().write_all(command.as_bytes())?;
+        Ok(())
+    }
+
     fn show_input_selector(&mut self, args: &config::keyassignment::InputSelector) {
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -3397,6 +3513,8 @@ impl TermWindow {
                     termwiz::escape::Esc::Code(termwiz::escape::EscCode::FullReset),
                 )]);
             }
+            SwitchGitBranch => self.show_git_branch_selector(pane),
+            SwitchToGitBranch(branch) => self.switch_to_git_branch(pane, branch)?,
             OpenUri(link) => {
                 wezterm_open_url::open_url(link);
             }
@@ -3411,7 +3529,7 @@ impl TermWindow {
         Ok(PerformAssignmentResult::Handled)
     }
 
-    fn do_open_link_at_mouse_cursor(&self, pane: &Arc<dyn Pane>) {
+    fn do_open_link_at_mouse_cursor(&mut self, pane: &Arc<dyn Pane>) {
         // They clicked on a link, so let's open it!
         // We need to ensure that we spawn the `open` call outside of the context
         // of our window loop; on Windows it can cause a panic due to
@@ -3420,6 +3538,11 @@ impl TermWindow {
         // perform below; here we allow the user to define an `open-uri` event
         // handler that can bypass the normal `open_url` functionality.
         if let Some(link) = self.current_highlight.as_ref().cloned() {
+            if link.uri() == "kaku://switch-git-branch" {
+                self.show_git_branch_selector(pane);
+                return;
+            }
+
             let window = GuiWin::new(self);
             let pane = MuxPane(pane.pane_id());
 
