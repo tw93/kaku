@@ -909,9 +909,8 @@ impl App {
             return;
         }
         self.editing = true;
-        self.edit_buf = if field.value == "—" {
-        // API Key fields show masked values; start with empty buffer to avoid saving the mask
-        self.edit_buf = if field.key.contains("API Key") {
+        // Clear buffer for placeholder "—" and masked API Key values
+        self.edit_buf = if field.value == "—" || field.key.contains("API Key") {
             String::new()
         } else {
             field.value.clone()
