@@ -241,7 +241,7 @@ config.font_rules = {
 
 config.bold_brightens_ansi_colors = false
 -- Auto-adjust font size based on screen DPI.
--- Retina (>=150 DPI): 17px, low-resolution external displays (<150 DPI): 15px.
+-- Retina (>=150 DPI): 14pt, low-resolution external displays (<150 DPI): 13pt.
 local function get_font_size()
   local success, screens = pcall(function()
     return wezterm.gui.screens()
@@ -249,10 +249,10 @@ local function get_font_size()
   if success and screens and screens.main then
     local dpi = screens.main.effective_dpi or 72
     if dpi < 150 then
-      return 15.0  -- Low-resolution external display
+      return 13.0  -- Low-resolution external display
     end
   end
-  return 17.0  -- Retina default
+  return 14.0  -- Retina default
 end
 
 config.font_size = get_font_size()
