@@ -555,3 +555,106 @@ pub fn ui_key(key: &KeyCode, ui_key_cap_rendering: UIKeyCapRendering) -> String 
         _ => format!("{key:?}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::keyassignment::{KeyAssignment, LauncherFlags, MouseEventTrigger};
+    use config::{MouseEventAltScreen, MouseEventTriggerMods};
+    use wezterm_term::input::MouseButton;
+    use window::Modifiers;
+
+    #[test]
+    fn right_click_binding_exists_in_default_input_map() {
+        let map = InputMap::default_input_map();
+
+        let trigger = MouseEventTrigger::Down {
+            streak: 1,
+            button: MouseButton::Right,
+        };
+
+        // After expansion, MouseEventAltScreen::Any becomes both True and False entries
+        let mods_false = MouseEventTriggerMods {
+            mods: Modifiers::NONE,
+            mouse_reporting: false,
+            alt_screen: MouseEventAltScreen::False,
+        };
+
+        let action_false = map.mouse.get(&(trigger.clone(), mods_false));
+        assert!(
+            action_false.is_some(),
+            "Right-click binding should exist in default mouse map (alt_screen=False)"
+        );
+
+        match action_false {
+            Some(KeyAssignment::ShowLauncherArgs(args)) => {
+                assert!(
+                    args.flags.contains(LauncherFlags::COMMANDS),
+                    "Right-click should trigger launcher with COMMANDS flag"
+                );
+                assert_eq!(
+                    args.title.as_deref(),
+                    Some("Pane Actions"),
+                    "Right-click launcher title should be 'Pane Actions'"
+                );
+            }
+            other => panic!(
+                "Right-click binding should be ShowLauncherArgs, got {:?}",
+                other
+            ),
+        }
+
+        // Verify the alt_screen=True variant also exists
+        let mods_true = MouseEventTriggerMods {
+            mods: Modifiers::NONE,
+            mouse_reporting: false,
+            alt_screen: MouseEventAltScreen::True,
+        };
+        let action_true = map.mouse.get(&(trigger, mods_true));
+        assert!(
+            action_true.is_some(),
+            "Right-click binding should also exist for alt_screen=True"
+        );
+    }
+
+    #[test]
+    fn right_click_binding_not_present_when_mouse_reporting_enabled() {
+        let map = InputMap::default_input_map();
+
+        let trigger = MouseEventTrigger::Down {
+            streak: 1,
+            button: MouseButton::Right,
+        };
+        let mods_reporting = MouseEventTriggerMods {
+            mods: Modifiers::NONE,
+            mouse_reporting: true,
+            alt_screen: MouseEventAltScreen::False,
+        };
+
+        let action = map.mouse.get(&(trigger, mods_reporting));
+        assert!(
+            action.is_none(),
+            "Right-click binding should NOT exist when mouse_reporting=true"
+        );
+    }
+
+    #[test]
+    fn shift_right_click_does_not_trigger_show_launcher_args() {
+        let map = InputMap::default_input_map();
+
+        let trigger = MouseEventTrigger::Down {
+            streak: 1,
+            button: MouseButton::Right,
+        };
+        let mods_shift = MouseEventTriggerMods {
+            mods: Modifiers::SHIFT,
+            mouse_reporting: false,
+            alt_screen: MouseEventAltScreen::False,
+        };
+
+        let action = map.mouse.get(&(trigger, mods_shift));
+        if matches!(action, Some(KeyAssignment::ShowLauncherArgs(_))) {
+            panic!("SHIFT+Right-click should NOT trigger ShowLauncherArgs");
+        }
+    }
+}
