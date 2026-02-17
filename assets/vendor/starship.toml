@@ -12,6 +12,9 @@ success_symbol = " "
 error_symbol = " "
 format = "$symbol"
 
+[rust]
+format = "via [$symbol($version)]($style)"
+
 [line_break]
 disabled = true
 
@@ -41,6 +44,3 @@ disabled = true
 
 [terraform]
 disabled = true
-
-[rust]
-format = "via [$symbol($version)]($style)"
