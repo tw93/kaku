@@ -58,8 +58,7 @@ impl crate::TermWindow {
                 None => 1.5,
             };
             let y_start = pos_y - (cell_height / 2.0) - extend_top * cell_height;
-            let height =
-                (1.0 + split.size as f32 + extend_top + extend_bottom) * cell_height;
+            let height = (1.0 + split.size as f32 + extend_top + extend_bottom) * cell_height;
 
             self.filled_rectangle(
                 layers,
@@ -98,8 +97,7 @@ impl crate::TermWindow {
                 None => 2.0,
             };
             let x_start = pos_x - (cell_width / 2.0) - extend_left * cell_width;
-            let width =
-                (1.0 + split.size as f32 + extend_left + extend_right) * cell_width;
+            let width = (1.0 + split.size as f32 + extend_left + extend_right) * cell_width;
 
             self.filled_rectangle(
                 layers,
