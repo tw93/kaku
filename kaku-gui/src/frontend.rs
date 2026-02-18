@@ -679,7 +679,13 @@ impl GuiFrontEnd {
                     .insert(mux_window_id);
                 log::trace!("Creating TermWindow for mux_window_id={}", mux_window_id);
                 if let Err(err) = TermWindow::new_window(mux_window_id).await {
+                    let err_text = format!("{:#}", err);
                     log::error!("Failed to create window: {:#}", err);
+                    if err_text.contains("failed to create NSOpenGLPixelFormat") {
+                        log::error!(
+                            "OpenGL initialization failed. This often means no compatible GPU renderer is available (for example in some VMs). Try setting `front_end = 'WebGpu'` in kaku.lua or enabling VM GPU acceleration."
+                        );
+                    }
                     let mux = Mux::get();
                     mux.kill_window(mux_window_id);
                     front_end()
