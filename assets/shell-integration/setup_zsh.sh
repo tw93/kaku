@@ -265,11 +265,40 @@ if [[ -f "\$KAKU_ZSH_DIR/plugins/zsh-z/zsh-z.plugin.zsh" ]]; then
 fi
 
 # Load zsh-autosuggestions - Async, minimal impact
-# Tab key performs normal completion (expand-or-complete)
-# Use Right Arrow or End key to accept autosuggestions
 if [[ -f "\$KAKU_ZSH_DIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
     source "\$KAKU_ZSH_DIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
 fi
+
+# Smart Tab behavior:
+# - Use completion while typing arguments/path-like tokens
+# - Accept inline suggestion first only for the first command token
+_kaku_tab_widget() {
+    emulate -L zsh
+
+    local has_suggestion=0
+    if (( \${+widgets[autosuggest-accept]} )) && [[ -n "\${POSTDISPLAY:-}" ]]; then
+        has_suggestion=1
+    fi
+
+    # Use completion while typing arguments (e.g. `vim READ<Tab>`)
+    # and for path-like command tokens (`./scr<Tab>`).
+    local lbuf="\${LBUFFER}"
+    local trimmed="\${lbuf#\${lbuf%%[![:space:]]*}}"
+    local current_token="\${lbuf##*[[:space:]]}"
+
+    if [[ -z "\$trimmed" || "\$trimmed" == *[[:space:]]* || "\$current_token" == */* ]]; then
+        zle expand-or-complete
+        return
+    fi
+
+    if (( has_suggestion )); then
+        zle autosuggest-accept
+    else
+        zle expand-or-complete
+    fi
+}
+zle -N _kaku_tab_widget
+bindkey '^I' _kaku_tab_widget
 
 # Defer zsh-syntax-highlighting to first prompt (~40ms saved at startup)
 # This plugin must be loaded LAST, and we delay it for faster shell startup

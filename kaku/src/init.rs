@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context};
 use clap::Parser;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Parser, Clone, Default)]
@@ -122,7 +122,7 @@ exit 127
     fn resolve_preferred_kaku_bin() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("KAKU_BIN") {
             let path = PathBuf::from(path);
-            if path.exists() {
+            if is_executable_file(&path) {
                 return Some(path);
             }
         }
@@ -133,7 +133,7 @@ exit 127
                 .and_then(|n| n.to_str())
                 .map(|n| n.eq_ignore_ascii_case("kaku"))
                 .unwrap_or(false)
-                && exe.exists()
+                && is_executable_file(&exe)
             {
                 return Some(exe);
             }
@@ -148,12 +148,18 @@ exit 127
                 .join("MacOS")
                 .join("kaku"),
         ] {
-            if candidate.exists() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
 
         None
+    }
+
+    fn is_executable_file(path: &Path) -> bool {
+        fs::metadata(path)
+            .map(|meta| meta.is_file() && (meta.permissions().mode() & 0o111 != 0))
+            .unwrap_or(false)
     }
 
     fn escape_for_double_quotes(value: &str) -> String {

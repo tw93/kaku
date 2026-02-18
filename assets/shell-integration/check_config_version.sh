@@ -8,102 +8,23 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-CURRENT_CONFIG_VERSION=9
+CURRENT_CONFIG_VERSION=10
 CONFIG_DIR="$HOME/.config/kaku"
 STATE_FILE="$CONFIG_DIR/state.json"
 LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
 LEGACY_GEOMETRY_FILE="$CONFIG_DIR/.kaku_window_geometry"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SCRIPT="$SCRIPT_DIR/state_common.sh"
 
-read_config_version() {
-	if [[ ! -f "$STATE_FILE" ]]; then
-		printf '%s\n' "0"
-		return
-	fi
-
-	local version
-	version="$(sed -nE 's/.*"config_version"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
-	if [[ "$version" =~ ^[0-9]+$ ]]; then
-		printf '%s\n' "$version"
-	else
-		printf '%s\n' "0"
-	fi
-}
-
-persist_config_version() {
-	local target_version="${1:-$CURRENT_CONFIG_VERSION}"
-	mkdir -p "$CONFIG_DIR"
-
-	local width height geometry_json
-	width=""
-	height=""
-	geometry_json=""
-
-	if [[ -f "$STATE_FILE" ]]; then
-		width="$(sed -nE 's/.*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
-		height="$(sed -nE 's/.*"height"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$STATE_FILE" | head -n 1)"
-	fi
-
-	if [[ -z "$width" || -z "$height" ]] && [[ -f "$LEGACY_GEOMETRY_FILE" ]]; then
-		local geometry
-		geometry="$(tr -d '[:space:]' < "$LEGACY_GEOMETRY_FILE" || true)"
-		local a b c d
-		IFS=',' read -r a b c d <<< "$geometry"
-		if [[ "${c:-}" =~ ^[0-9]+$ && "${d:-}" =~ ^[0-9]+$ ]]; then
-			width="$c"
-			height="$d"
-		elif [[ "${a:-}" =~ ^[0-9]+$ && "${b:-}" =~ ^[0-9]+$ ]]; then
-			width="$a"
-			height="$b"
-		fi
-	fi
-
-	if [[ -n "$width" && -n "$height" ]]; then
-		geometry_json="$(printf ',\n  "window_geometry": {\n    "width": %s,\n    "height": %s\n  }' "$width" "$height")"
-	fi
-
-	printf "{\n  \"config_version\": %s%s\n}\n" "$target_version" "$geometry_json" >"$STATE_FILE"
-
-	rm -f "$LEGACY_VERSION_FILE" "$LEGACY_GEOMETRY_FILE"
-}
-
-detect_login_shell() {
-	if [[ -n "${SHELL:-}" && -x "${SHELL:-}" ]]; then
-		printf '%s\n' "$SHELL"
-		return
-	fi
-
-	local current_user resolved_shell passwd_entry
-	current_user="${USER:-}"
-	if [[ -z "$current_user" ]]; then
-		current_user="$(id -un 2>/dev/null || true)"
-	fi
-
-	if [[ -n "$current_user" ]] && command -v dscl &>/dev/null; then
-		resolved_shell="$(dscl . -read "/Users/$current_user" UserShell 2>/dev/null | awk '/UserShell:/ { print $2 }')"
-		if [[ -n "$resolved_shell" && -x "$resolved_shell" ]]; then
-			printf '%s\n' "$resolved_shell"
-			return
-		fi
-	fi
-
-	if [[ -n "$current_user" ]] && command -v getent &>/dev/null; then
-		passwd_entry="$(getent passwd "$current_user" 2>/dev/null || true)"
-		resolved_shell="${passwd_entry##*:}"
-		if [[ -n "$resolved_shell" && -x "$resolved_shell" ]]; then
-			printf '%s\n' "$resolved_shell"
-			return
-		fi
-	fi
-
-	if [[ -x "/bin/zsh" ]]; then
-		printf '%s\n' "/bin/zsh"
-	else
-		printf '%s\n' "/bin/sh"
-	fi
-}
+if [[ ! -f "$COMMON_SCRIPT" ]]; then
+	echo -e "${YELLOW}Error: missing shared state script: $COMMON_SCRIPT${NC}"
+	exit 1
+fi
+# shellcheck source=state_common.sh
+source "$COMMON_SCRIPT"
 
 # Determine resource dir (always derive from script location, not hardcoded path)
-RESOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOURCE_DIR="$SCRIPT_DIR"
 
 user_version="$(read_config_version)"
 
@@ -140,51 +61,19 @@ fi
 echo -e "${BOLD}Kaku config update available!${NC} v$user_version -> v$CURRENT_CONFIG_VERSION"
 echo ""
 
-# Show what's new
+# Show only current release highlights to keep this prompt short and maintainable.
 echo -e "${BOLD}What's new:${NC}"
-if [[ $user_version -lt 2 ]]; then
-	echo "  • 40% faster ZSH startup"
-	echo "  • Deferred syntax highlighting"
-	echo "  • Delta - syntax-highlighted git diffs"
-	echo "  • Better aliases"
-fi
-if [[ $user_version -lt 3 ]]; then
-	echo "  • More reliable setup path detection"
-	echo "  • Respect ZDOTDIR when patching .zshrc"
-	echo "  • Prevent repeated first-run onboarding loops"
-fi
-if [[ $user_version -lt 4 ]]; then
-	echo "  • Delta defaults to side-by-side with line numbers"
-	echo "  • Mouse wheel scrolling enabled in diff pager"
-	echo "  • Cleaner file labels and theme-aligned highlighting"
-fi
-if [[ $user_version -lt 5 ]]; then
-	echo "  • Refined diff header display to avoid duplicate file hints"
-	echo "  • Updated Delta default theme and label readability"
-	echo "  • Better protection for user custom kaku.lua during onboarding"
-fi
-if [[ $user_version -lt 6 ]]; then
-	echo "  • Added zsh-completions to default shell setup"
-	echo "  • Richer command and subcommand Tab completion coverage"
-	echo "  • Tab now accepts inline autosuggestions first"
-	echo "  • If no suggestion is shown, Tab still performs normal completion"
-fi
-if [[ $user_version -lt 7 ]]; then
-	echo "  • Migrate legacy inline Kaku shell blocks out of .zshrc"
-	echo "  • Keep only one Kaku source line in .zshrc"
-	echo "  • Hide default cloud context segments in Starship prompt"
-fi
-if [[ $user_version -lt 8 ]]; then
-	echo "  • Preserve complete Zsh history persistence across sessions"
-	echo "  • Respect ZDOTDIR and existing HISTFILE/HISTSIZE defaults"
-	echo "  • Write history entries immediately with timestamps"
-fi
-if [[ $user_version -lt 9 ]]; then
-	echo "  • Tab key now shows completion list instead of accepting suggestions"
-	echo "  • Use Right Arrow key to accept autosuggestions"
-	echo "  • Auto set TERM=xterm-256color for SSH to fix remote compatibility"
-	echo "  • OpenCode theme matching Kaku's color palette"
-fi
+case "$CURRENT_CONFIG_VERSION" in
+10)
+	echo "  • Smart Tab now prefers completion for arguments and path-like tokens"
+	echo "  • Inline autosuggestion accept is kept for the first command token"
+	echo "  • Shell update flow remains single-source via managed kaku.zsh"
+	;;
+*)
+	echo "  • Shell integration and reliability improvements"
+	echo "  • See project release notes for full details"
+	;;
+esac
 echo ""
 
 read -p "Apply update? [Y/n] " -n 1 -r
@@ -202,6 +91,9 @@ fi
 # Apply updates
 if [[ -f "$RESOURCE_DIR/setup_zsh.sh" ]]; then
 	bash "$RESOURCE_DIR/setup_zsh.sh" --update-only
+else
+	echo -e "${YELLOW}Error: missing setup script at $RESOURCE_DIR/setup_zsh.sh${NC}"
+	exit 1
 fi
 
 if [[ ! -f "$HOME/.config/kaku/zsh/bin/delta" ]]; then

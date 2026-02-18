@@ -265,18 +265,15 @@ mod imp {
         }
 
         // Old cask name "kaku" conflicts with another software in homebrew/cask.
-        // Do not use it; prompt user to migrate instead.
+        // Warn and fall back to direct update so existing users are not blocked.
         if is_brew_cask_installed(&brew_bin, "kaku")? {
             println!(
                 "WARNING: Detected old Homebrew cask 'kaku' which conflicts with another software."
             );
-            println!("Please migrate to the new cask name manually:");
-            println!();
+            println!("Proceeding with direct update from GitHub for this run.");
+            println!("Please migrate when convenient:");
             println!("  brew uninstall --cask kaku");
             println!("  brew install --cask {}", BREW_CASK_NAME);
-            println!();
-            println!("After migration, run 'kaku update' again.");
-            // Return None to fall back to direct update from GitHub
             return Ok(None);
         }
 
