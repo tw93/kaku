@@ -39,14 +39,14 @@ Kaku comes with intuitive macOS-native shortcuts:
 | :--- | :--- |
 | New Tab | `Cmd + T` |
 | New Window | `Cmd + N` |
+| Close Tab/Pane | `Cmd + W` |
+| Navigate Tabs | `Cmd + Shift + [`, `Cmd + Shift + ]` or `Cmd + 1-9` |
+| Navigate Panes | `Cmd + Opt + Arrows` |
 | Split Pane Vertical | `Cmd + D` |
 | Split Pane Horizontal | `Cmd + Shift + D` |
 | Toggle Split Direction | `Cmd + Shift + S` |
 | Zoom/Unzoom Pane | `Cmd + Shift + Enter` |
 | Resize Pane | `Cmd + Ctrl + Arrows` |
-| Close Tab/Pane | `Cmd + W` |
-| Navigate Tabs | `Cmd + Shift + [`, `Cmd + Shift + ]` or `Cmd + 1-9` |
-| Navigate Panes | `Cmd + Opt + Arrows` |
 | Clear Screen | `Cmd + K` |
 | Font Size | `Cmd + +`, `Cmd + -`, `Cmd + 0` |
 | Smart Jump | `z <dir>` |
@@ -107,7 +107,11 @@ Achieved through aggressive stripping of unused features, lazy loading of color 
    config.split_thickness = 1
    ```
 
-4. **Can Kaku use transparent windows on macOS?**
+4. **Is there a default "next/previous pane" shortcut?**
+
+   Not by default. Kaku intentionally uses directional pane navigation (`Cmd + Opt + Arrows`) because it maps directly to pane layout and is easier to predict in complex splits. If you prefer cyclic switching, add custom key bindings for `ActivatePaneDirection('Next')` and `ActivatePaneDirection('Prev')` in your `kaku.lua`.
+
+5. **Can Kaku use transparent windows on macOS?**
 
    Yes. You can set `window_background_opacity` and optionally `macos_window_background_blur` in `~/.config/kaku/kaku.lua`. Transparent mode now keeps top/right/bottom padding regions visually consistent to avoid transparent gaps.
 
