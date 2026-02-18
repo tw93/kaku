@@ -162,7 +162,7 @@ else
 	echo "Warning: Could not detect version from kaku/Cargo.toml"
 fi
 
-echo "[3/7] Downloading vendor dependencies..."
+echo "[3/7] Downloading vendor plugins..."
 ./scripts/download_vendor.sh
 
 echo "[4/7] Copying resources and binaries..."
@@ -170,7 +170,14 @@ cp -R assets/shell-integration/* "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/shell-completion "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/fonts "$APP_BUNDLE_OUT/Contents/Resources/"
 mkdir -p "$APP_BUNDLE_OUT/Contents/Resources/vendor"
-cp -R assets/vendor/* "$APP_BUNDLE_OUT/Contents/Resources/vendor/"
+for vendor_item in starship.toml zsh-z zsh-autosuggestions zsh-syntax-highlighting zsh-completions; do
+	src_path="assets/vendor/$vendor_item"
+	if [[ -e "$src_path" ]]; then
+		cp -R "$src_path" "$APP_BUNDLE_OUT/Contents/Resources/vendor/"
+	else
+		echo "Warning: missing vendor item: $src_path"
+	fi
+done
 cp assets/shell-integration/first_run.sh "$APP_BUNDLE_OUT/Contents/Resources/"
 chmod +x "$APP_BUNDLE_OUT/Contents/Resources/first_run.sh"
 
@@ -206,17 +213,6 @@ else
 		echo "Release build: using ad-hoc signing (set KAKU_SIGNING_IDENTITY for developer certificate)"
 	fi
 fi
-
-# Sign vendored binaries before signing the main app bundle
-echo "[5.5/7] Signing vendored binaries..."
-VENDOR_BINARIES=("starship" "delta" "zoxide")
-for bin_name in "${VENDOR_BINARIES[@]}"; do
-	bin_path="$APP_BUNDLE_OUT/Contents/Resources/vendor/$bin_name"
-	if [[ -f "$bin_path" && "$SIGNING_IDENTITY" != "-" ]]; then
-		echo "Signing vendor binary: $bin_name"
-		codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$bin_path" || echo "Warning: Failed to sign $bin_name"
-	fi
-done
 
 codesign --force --deep --options runtime \
 	--entitlements assets/macos/Kaku.entitlements \

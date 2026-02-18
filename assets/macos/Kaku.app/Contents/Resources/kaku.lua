@@ -139,6 +139,345 @@ local function now_secs()
   return os.time()
 end
 
+local home_dir = os.getenv("HOME")
+local kaku_state_dir = home_dir and (home_dir .. "/.config/kaku") or nil
+local lazygit_state_file = kaku_state_dir and (kaku_state_dir .. "/lazygit_state.json") or nil
+local lazygit_state_cache = nil
+local lazygit_repo_probe_cache = {}
+local lazygit_repo_probe_interval_secs = 5
+local lazygit_command_probe = { value = nil, command = nil, checked_at = 0 }
+local lazygit_command_probe_interval_secs = 30
+
+local function trim_trailing_whitespace(value)
+  if type(value) ~= "string" then
+    return ""
+  end
+  return value:gsub("%s+$", "")
+end
+
+local function ensure_kaku_state_dir()
+  if not kaku_state_dir or kaku_state_dir == "" then
+    return
+  end
+  os.execute(string.format("mkdir -p %q", kaku_state_dir))
+end
+
+local function load_lazygit_state()
+  if lazygit_state_cache then
+    return lazygit_state_cache
+  end
+
+  local state = { repos = {} }
+  if not lazygit_state_file then
+    lazygit_state_cache = state
+    return state
+  end
+
+  local file = io.open(lazygit_state_file, "r")
+  if file then
+    local raw = file:read("*all")
+    file:close()
+    if raw and raw ~= "" then
+      local ok, parsed = pcall(wezterm.json_parse, raw)
+      if ok and type(parsed) == "table" then
+        state = parsed
+      end
+    end
+  end
+
+  if type(state.repos) ~= "table" then
+    state.repos = {}
+  end
+
+  lazygit_state_cache = state
+  return state
+end
+
+local function save_lazygit_state()
+  if not lazygit_state_file then
+    return
+  end
+
+  ensure_kaku_state_dir()
+  local state = load_lazygit_state()
+  local ok, encoded = pcall(wezterm.json_encode, state)
+  if not ok or type(encoded) ~= "string" or encoded == "" then
+    return
+  end
+
+  local file = io.open(lazygit_state_file, "w")
+  if not file then
+    return
+  end
+  file:write(encoded .. "\n")
+  file:close()
+end
+
+local function get_lazygit_repo_flags(repo_root)
+  local repos = load_lazygit_state().repos
+  local flags = repos[repo_root]
+  if type(flags) ~= "table" then
+    flags = { hinted = false, used = false }
+    repos[repo_root] = flags
+  end
+  flags.hinted = flags.hinted == true
+  flags.used = flags.used == true
+  return flags
+end
+
+local function mark_repo_lazygit_hinted(repo_root)
+  if not repo_root or repo_root == "" then
+    return
+  end
+  local flags = get_lazygit_repo_flags(repo_root)
+  if flags.hinted then
+    return
+  end
+  flags.hinted = true
+  save_lazygit_state()
+end
+
+local function mark_repo_lazygit_used(repo_root)
+  if not repo_root or repo_root == "" then
+    return
+  end
+  local flags = get_lazygit_repo_flags(repo_root)
+  if flags.used then
+    return
+  end
+  flags.used = true
+  save_lazygit_state()
+end
+
+local function pane_cwd(pane)
+  if not pane then
+    return ""
+  end
+
+  local ok, runtime_cwd = pcall(function()
+    return pane:get_current_working_dir()
+  end)
+  if ok and runtime_cwd then
+    local path = extract_path_from_cwd(runtime_cwd)
+    if path ~= "" then
+      return path
+    end
+  end
+
+  return extract_path_from_cwd(pane.current_working_dir)
+end
+
+local function detect_git_repo_root(path)
+  if not path or path == "" then
+    return nil
+  end
+
+  local ok, stdout = wezterm.run_child_process({
+    "git",
+    "-C",
+    path,
+    "rev-parse",
+    "--show-toplevel",
+  })
+  if not ok then
+    return nil
+  end
+
+  local repo_root = trim_trailing_whitespace(stdout)
+  if repo_root == "" then
+    return nil
+  end
+  return repo_root
+end
+
+local function repo_has_pending_changes(repo_root)
+  local ok, stdout = wezterm.run_child_process({
+    "git",
+    "-C",
+    repo_root,
+    "status",
+    "--porcelain",
+    "--untracked-files=normal",
+  })
+  if not ok then
+    return false
+  end
+  return trim_trailing_whitespace(stdout) ~= ""
+end
+
+local function git_repo_context(path)
+  local now = now_secs()
+  local cached = lazygit_repo_probe_cache[path]
+  if cached and (now - cached.checked_at) < lazygit_repo_probe_interval_secs then
+    return cached.repo_root, cached.has_changes
+  end
+
+  local repo_root = detect_git_repo_root(path)
+  local has_changes = false
+  if repo_root then
+    has_changes = repo_has_pending_changes(repo_root)
+  end
+
+  lazygit_repo_probe_cache[path] = {
+    checked_at = now,
+    repo_root = repo_root,
+    has_changes = has_changes,
+  }
+
+  return repo_root, has_changes
+end
+
+local function resolve_lazygit_command()
+  local now = now_secs()
+  local cached_value = lazygit_command_probe.value
+  if cached_value ~= nil then
+    local age = now - lazygit_command_probe.checked_at
+    if cached_value or age < lazygit_command_probe_interval_secs then
+      return lazygit_command_probe.command
+    end
+  end
+
+  local candidates = {
+    "lazygit",
+    "/opt/homebrew/bin/lazygit",
+    "/usr/local/bin/lazygit",
+  }
+  local resolved = nil
+  for _, cmd in ipairs(candidates) do
+    local call_ok, run_result = pcall(function()
+      return select(1, wezterm.run_child_process({ cmd, "--version" }))
+    end)
+    if call_ok and run_result then
+      resolved = cmd
+      break
+    end
+  end
+
+  lazygit_command_probe.value = resolved ~= nil
+  lazygit_command_probe.command = resolved
+  lazygit_command_probe.checked_at = now
+  return resolved
+end
+
+local function is_lazygit_installed()
+  return resolve_lazygit_command() ~= nil
+end
+
+local function pane_is_lazygit(pane)
+  if not pane then
+    return false
+  end
+
+  local ok, proc = pcall(function()
+    return pane:get_foreground_process_name()
+  end)
+  if not ok or type(proc) ~= "string" or proc == "" then
+    return false
+  end
+
+  return basename(proc) == "lazygit"
+end
+
+local function resolve_active_pane(window, pane)
+  if pane then
+    return pane
+  end
+  if not window then
+    return nil
+  end
+
+  local ok_tab, tab = pcall(function()
+    return window:active_tab()
+  end)
+  if ok_tab and tab then
+    local ok_pane, active_pane = pcall(function()
+      return tab:active_pane()
+    end)
+    if ok_pane then
+      return active_pane
+    end
+  end
+
+  return nil
+end
+
+local function show_lazygit_toast(window, pane, event_name)
+  if not window then
+    return
+  end
+  pcall(function()
+    window:perform_action(wezterm.action.EmitEvent(event_name), pane)
+  end)
+end
+
+local function maybe_show_lazygit_hint(window, pane)
+  pane = resolve_active_pane(window, pane)
+
+  local path = pane_cwd(pane)
+  if path == "" then
+    return
+  end
+
+  local repo_root, has_changes = git_repo_context(path)
+  if not repo_root then
+    return
+  end
+
+  if pane_is_lazygit(pane) then
+    mark_repo_lazygit_used(repo_root)
+    return
+  end
+
+  local flags = get_lazygit_repo_flags(repo_root)
+  if flags.hinted or flags.used or not has_changes then
+    return
+  end
+
+  if not is_lazygit_installed() then
+    return
+  end
+
+  show_lazygit_toast(window, pane, "kaku-toast-try-lazygit")
+  mark_repo_lazygit_hinted(repo_root)
+end
+
+local function launch_lazygit(window, pane)
+  pane = resolve_active_pane(window, pane)
+  if not pane then
+    show_lazygit_toast(window, pane, "kaku-toast-lazygit-no-pane")
+    return
+  end
+
+  local path = pane_cwd(pane)
+  if path == "" then
+    show_lazygit_toast(window, pane, "kaku-toast-lazygit-no-cwd")
+    return
+  end
+
+  local repo_root = detect_git_repo_root(path)
+  if not repo_root then
+    show_lazygit_toast(window, pane, "kaku-toast-lazygit-not-git")
+    return
+  end
+
+  local lazygit_cmd = resolve_lazygit_command()
+  if not lazygit_cmd then
+    show_lazygit_toast(window, pane, "kaku-toast-lazygit-missing")
+    return
+  end
+
+  mark_repo_lazygit_used(repo_root)
+  local ok = pcall(function()
+    window:perform_action(
+      wezterm.action.SendString(lazygit_cmd .. "\r"),
+      pane
+    )
+  end)
+  if not ok then
+    show_lazygit_toast(window, pane, "kaku-toast-lazygit-dispatch-failed")
+  end
+end
+
 local function evict_stale_cache(live_pane_ids)
   for pane_id in pairs(active_tab_cwd_cache) do
     if not live_pane_ids[pane_id] then
@@ -263,7 +602,13 @@ wezterm.on('window-resized', function(window, _)
   update_window_config(window, dims.is_full_screen)
 end)
 
-wezterm.on('update-right-status', function(window)
+wezterm.on('kaku-launch-lazygit', function(window, pane)
+  launch_lazygit(window, pane)
+end)
+
+wezterm.on('update-right-status', function(window, pane)
+  maybe_show_lazygit_hint(window, pane)
+
   local dims = window:get_dimensions()
   if not dims.is_full_screen then
     window:set_right_status('')
@@ -570,6 +915,20 @@ config.keys = {
     action = wezterm.action.SpawnTab('CurrentPaneDomain'),
   },
 
+  -- Cmd+Shift+A: open Kaku AI config in current pane
+  {
+    key = 'A',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('run-kaku-ai-config'),
+  },
+
+  -- Cmd+Shift+G: launch lazygit in current pane
+  {
+    key = 'G',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-launch-lazygit'),
+  },
+
   -- Cmd+Ctrl+F: toggle fullscreen
   {
     key = 'f',
@@ -812,6 +1171,7 @@ config.front_end = 'OpenGL'
 config.webgpu_power_preference = 'HighPerformance'
 config.animation_fps = 60
 config.max_fps = 60
+config.status_update_interval = 1000
 
 -- ===== Visuals & Splits =====
 -- Split pane gap: gutter = 1 + 2*gap cells, giving ~40px padding on each side

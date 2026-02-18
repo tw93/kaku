@@ -25,6 +25,7 @@ source "$COMMON_SCRIPT"
 
 # Determine resource dir (always derive from script location, not hardcoded path)
 RESOURCE_DIR="$SCRIPT_DIR"
+TOOLS_SCRIPT="$RESOURCE_DIR/install_cli_tools.sh"
 
 user_version="$(read_config_version)"
 
@@ -90,24 +91,16 @@ fi
 
 # Apply updates
 if [[ -f "$RESOURCE_DIR/setup_zsh.sh" ]]; then
-	bash "$RESOURCE_DIR/setup_zsh.sh" --update-only
+	KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$RESOURCE_DIR/setup_zsh.sh" --update-only
 else
 	echo -e "${YELLOW}Error: missing setup script at $RESOURCE_DIR/setup_zsh.sh${NC}"
 	exit 1
 fi
 
-if [[ ! -f "$HOME/.config/kaku/zsh/bin/delta" ]]; then
-	if [[ -f "$RESOURCE_DIR/install_delta.sh" ]]; then
-		read -p "Install Delta for better git diffs? [Y/n] " -n 1 -r
-		echo
-		if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-			if ! bash "$RESOURCE_DIR/install_delta.sh"; then
-				echo ""
-				echo -e "${YELLOW}Delta installation failed.${NC}"
-				echo "You can retry later with:"
-				echo "  bash \"$RESOURCE_DIR/install_delta.sh\""
-			fi
-		fi
+if [[ -f "$TOOLS_SCRIPT" ]]; then
+	if ! bash "$TOOLS_SCRIPT"; then
+		echo ""
+		echo -e "${YELLOW}Optional tool installation failed.${NC}"
 	fi
 fi
 

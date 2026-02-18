@@ -59,6 +59,10 @@ else
 fi
 
 VENDOR_DIR="$RESOURCES_DIR/vendor"
+TOOL_INSTALL_SCRIPT="$SCRIPT_DIR/install_cli_tools.sh"
+if [[ ! -f "$TOOL_INSTALL_SCRIPT" ]]; then
+	TOOL_INSTALL_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
+fi
 USER_CONFIG_DIR="$HOME/.config/kaku/zsh"
 KAKU_INIT_FILE="$USER_CONFIG_DIR/kaku.zsh"
 STARSHIP_CONFIG="$HOME/.config/starship.toml"
@@ -86,14 +90,15 @@ mkdir -p "$USER_CONFIG_DIR"
 mkdir -p "$USER_CONFIG_DIR/plugins"
 mkdir -p "$USER_CONFIG_DIR/bin"
 
-# 2. Copy Resources to User Directory (persistence)
-# Copy Starship binary
-if [[ -f "$VENDOR_DIR/starship" ]]; then
-	cp "$VENDOR_DIR/starship" "$USER_CONFIG_DIR/bin/"
-	chmod +x "$USER_CONFIG_DIR/bin/starship"
-else
-	echo -e "${YELLOW}Warning: Starship binary not found in $VENDOR_DIR${NC}"
-	echo -e "${YELLOW}         Prompt will not be available until you reinstall Kaku.${NC}"
+# 2. Optional external tools bootstrap (Homebrew-managed)
+if [[ "${KAKU_SKIP_TOOL_BOOTSTRAP:-0}" != "1" ]]; then
+	if [[ -f "$TOOL_INSTALL_SCRIPT" ]]; then
+		if ! bash "$TOOL_INSTALL_SCRIPT"; then
+			echo -e "${YELLOW}Warning: optional CLI tool bootstrap failed.${NC}"
+		fi
+	else
+		echo -e "${YELLOW}Warning: missing tool bootstrap script at $TOOL_INSTALL_SCRIPT${NC}"
+	fi
 fi
 
 # Validate required plugin directories up front.
@@ -111,7 +116,7 @@ cp -R "$VENDOR_DIR/zsh-z" "$USER_CONFIG_DIR/plugins/"
 cp -R "$VENDOR_DIR/zsh-autosuggestions" "$USER_CONFIG_DIR/plugins/"
 cp -R "$VENDOR_DIR/zsh-syntax-highlighting" "$USER_CONFIG_DIR/plugins/"
 cp -R "$VENDOR_DIR/zsh-completions" "$USER_CONFIG_DIR/plugins/"
-echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed Starship & Zsh plugins ${NC}(~/.config/kaku/zsh)${NC}"
+echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed Zsh plugins ${NC}(~/.config/kaku/zsh/plugins)${NC}"
 
 # Copy Starship Config (if not exists)
 STARSHIP_CONFIG_CREATED=false
@@ -157,15 +162,12 @@ cat <<EOF >"$KAKU_INIT_FILE"
 
 export KAKU_ZSH_DIR="\$HOME/.config/kaku/zsh"
 
-# Add bundled binaries to PATH
+# Add Kaku managed bin to PATH (kaku wrapper and user tools)
 export PATH="\$KAKU_ZSH_DIR/bin:\$PATH"
 
 # Initialize Starship (Cross-shell prompt)
-# Check file existence to avoid "no such file" errors in some zsh configurations
-if [[ -x "\$KAKU_ZSH_DIR/bin/starship" ]]; then
-    eval "\$("\$KAKU_ZSH_DIR/bin/starship" init zsh)"
-elif command -v starship &> /dev/null; then
-    # Fallback to system starship if available
+# Use system installation managed by Homebrew (or user PATH).
+if command -v starship &> /dev/null; then
     eval "\$(starship init zsh)"
 fi
 
@@ -280,8 +282,8 @@ _kaku_tab_widget() {
         has_suggestion=1
     fi
 
-    # Use completion while typing arguments (e.g. `vim READ<Tab>`)
-    # and for path-like command tokens (`./scr<Tab>`).
+    # Use completion while typing arguments (e.g. 'vim READ<Tab>')
+    # and for path-like command tokens ('./scr<Tab>').
     local lbuf="\${LBUFFER}"
     local trimmed="\${lbuf#\${lbuf%%[![:space:]]*}}"
     local current_token="\${lbuf##*[[:space:]]}"

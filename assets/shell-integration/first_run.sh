@@ -36,6 +36,7 @@ else
 fi
 
 SETUP_SCRIPT="$RESOURCES_DIR/setup_zsh.sh"
+TOOLS_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
 
 # Clear screen
 clear
@@ -90,24 +91,10 @@ if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
 	INSTALL_THEME=true
 fi
 
-# Delta (Git Diff Beautifier) Prompt
-echo "--------------------------------------------------------"
-echo "Would you like to install Delta?"
-echo "Beautiful git diffs with syntax highlighting."
-echo "Perfect for code review and AI-assisted development."
-echo "--------------------------------------------------------"
-read -p "Install Delta? [Y/n] " -n 1 -r
-echo ""
-
-INSTALL_DELTA=false
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-	INSTALL_DELTA=true
-fi
-
 # Process Shell Features
 if [[ "$INSTALL_SHELL" == "true" ]]; then
 	if [[ -f "$SETUP_SCRIPT" ]]; then
-		if ! "$SETUP_SCRIPT"; then
+		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT"; then
 			echo ""
 			echo "Warning: shell setup failed. You can retry manually:"
 			echo "  bash \"$SETUP_SCRIPT\""
@@ -171,17 +158,14 @@ if [[ "$INSTALL_THEME" == "true" ]]; then
 	ensure_user_config_via_cli
 fi
 
-# Process Delta Installation
-if [[ "$INSTALL_DELTA" == "true" ]]; then
-	DELTA_SCRIPT="$RESOURCES_DIR/install_delta.sh"
-	if [[ -f "$DELTA_SCRIPT" ]]; then
-		echo ""
-		if ! bash "$DELTA_SCRIPT"; then
-			echo "Warning: Delta installation failed."
-		fi
-	else
-		echo "Warning: install_delta.sh not found at $DELTA_SCRIPT"
+# Process optional CLI tool installation (single prompt)
+if [[ -f "$TOOLS_SCRIPT" ]]; then
+	echo ""
+	if ! bash "$TOOLS_SCRIPT"; then
+		echo "Warning: optional tool installation failed."
 	fi
+else
+	echo "Warning: install_cli_tools.sh not found at $TOOLS_SCRIPT"
 fi
 
 echo -e "\n\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"

@@ -1096,18 +1096,40 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Shell", "Pane Encoding"],
             icon: None,
         },
-        EmitEvent(name) => CommandDef {
-            brief: format!("Emit event `{name}`").into(),
-            doc: format!(
-                "Emits the named event, causing any \
+        EmitEvent(name) => {
+            if name == "run-kaku-ai-config" {
+                CommandDef {
+                    brief: "Kaku AI Config".into(),
+                    doc: "Open Kaku AI config in the active pane".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "a".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: None,
+                }
+            } else if name == "kaku-launch-lazygit" {
+                CommandDef {
+                    brief: "Lazygit".into(),
+                    doc: "Open lazygit in the active pane".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "g".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: Some("oct_git_commit"),
+                }
+            } else {
+                CommandDef {
+                    brief: format!("Emit event `{name}`").into(),
+                    doc: format!(
+                        "Emits the named event, causing any \
                              associated event handler(s) to trigger"
-            )
-            .into(),
-            keys: vec![],
-            args: &[ArgType::ActiveWindow],
-            menubar: &[],
-            icon: None,
-        },
+                    )
+                    .into(),
+                    keys: vec![],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &[],
+                    icon: None,
+                }
+            }
+        }
         CloseCurrentTab { confirm: true } => CommandDef {
             brief: "Close current Tab".into(),
             doc: "Closes the current tab, terminating all the \
@@ -2081,6 +2103,8 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         // ----------------- Shell
         SpawnTab(SpawnTabDomain::CurrentPaneDomain),
         SpawnWindow,
+        EmitEvent("run-kaku-ai-config".to_string()),
+        EmitEvent("kaku-launch-lazygit".to_string()),
         SplitVertical(SpawnCommand {
             domain: SpawnTabDomain::CurrentPaneDomain,
             ..Default::default()

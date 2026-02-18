@@ -99,6 +99,11 @@ mod imp {
             &mut report,
         )?;
         remove_file_if_exists(
+            config_home().join("lazygit_state.json"),
+            "removed Lazygit hint state",
+            &mut report,
+        )?;
+        remove_file_if_exists(
             config_home().join(".first_run_completed"),
             "removed legacy first-run marker",
             &mut report,

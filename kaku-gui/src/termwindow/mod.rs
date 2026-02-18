@@ -3049,6 +3049,23 @@ impl TermWindow {
                     pane.writer().write_all(b"kaku update\n")?;
                 } else if name == "run-kaku-cli" {
                     pane.writer().write_all(b"kaku\n")?;
+                } else if name == "run-kaku-ai-config" {
+                    pane.writer().write_all(b"kaku ai\n")?;
+                } else if name == "kaku-run-lazygit" {
+                    // Backward compatibility for older event name.
+                    self.emit_window_event("kaku-launch-lazygit", None);
+                } else if name == "kaku-toast-try-lazygit" {
+                    self.show_toast("Try Lazygit: Cmd+Shift+G".to_string());
+                } else if name == "kaku-toast-lazygit-no-pane" {
+                    self.show_toast("Lazygit: No active pane".to_string());
+                } else if name == "kaku-toast-lazygit-no-cwd" {
+                    self.show_toast("Lazygit: Cannot detect current directory".to_string());
+                } else if name == "kaku-toast-lazygit-not-git" {
+                    self.show_toast("Lazygit: Not a git repository".to_string());
+                } else if name == "kaku-toast-lazygit-missing" {
+                    self.show_toast("Lazygit not found. Run kaku init".to_string());
+                } else if name == "kaku-toast-lazygit-dispatch-failed" {
+                    self.show_toast("Lazygit: Dispatch failed".to_string());
                 } else if name == "open-kaku-config" {
                     crate::frontend::open_kaku_config();
                 } else if name == crate::frontend::SET_DEFAULT_TERMINAL_EVENT {

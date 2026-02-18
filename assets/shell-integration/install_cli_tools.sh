@@ -1,0 +1,144 @@
+#!/bin/bash
+# Kaku CLI tools bootstrap
+# Installs required external tools via Homebrew and migrates legacy bundled binaries.
+
+set -euo pipefail
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+USER_BIN_DIR="$HOME/.config/kaku/zsh/bin"
+MISSING_TOOLS=()
+LEGACY_MIGRATED=0
+BREW_BIN=""
+
+resolve_brew_bin() {
+	if command -v brew >/dev/null 2>&1; then
+		command -v brew
+		return 0
+	fi
+
+	for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+		if [[ -x "$candidate" ]]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+ensure_homebrew_installation() {
+	if BREW_BIN="$(resolve_brew_bin)"; then
+		return 0
+	fi
+
+	echo -e "${YELLOW}Homebrew not found.${NC}"
+	echo "Install Homebrew first, then rerun initialization:"
+	echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+	return 1
+}
+
+resolved_tool_path() {
+	local tool_name="$1"
+	command -v "$tool_name" 2>/dev/null || true
+}
+
+is_legacy_tool_active() {
+	local tool_name="$1"
+	local resolved
+	resolved="$(resolved_tool_path "$tool_name")"
+	[[ "$resolved" == "$USER_BIN_DIR/$tool_name" ]]
+}
+
+collect_missing_tools() {
+	MISSING_TOOLS=()
+
+	if ! command -v starship >/dev/null 2>&1 || is_legacy_tool_active "starship"; then
+		MISSING_TOOLS+=("starship")
+	fi
+	if ! command -v delta >/dev/null 2>&1 || is_legacy_tool_active "delta"; then
+		MISSING_TOOLS+=("git-delta")
+	fi
+	if ! command -v lazygit >/dev/null 2>&1; then
+		MISSING_TOOLS+=("lazygit")
+	fi
+}
+
+migrate_legacy_binary_if_shadowed() {
+	local binary_name="$1"
+	local legacy_bin="$USER_BIN_DIR/$binary_name"
+
+	if [[ ! -f "$legacy_bin" ]]; then
+		return
+	fi
+
+	if ! ensure_homebrew_installation; then
+		return
+	fi
+
+	local brew_prefix
+	brew_prefix="$("$BREW_BIN" --prefix 2>/dev/null || true)"
+	if [[ -z "$brew_prefix" ]]; then
+		return
+	fi
+
+	local brew_bin="$brew_prefix/bin/$binary_name"
+	if [[ ! -x "$brew_bin" ]]; then
+		return
+	fi
+
+	rm -f "$legacy_bin"
+	LEGACY_MIGRATED=1
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Migrate${NC}     Removed legacy $binary_name binary from $legacy_bin"
+}
+
+install_missing_tools() {
+	collect_missing_tools
+
+	if [[ ${#MISSING_TOOLS[@]} -eq 0 ]]; then
+		return 0
+	fi
+
+	if ! ensure_homebrew_installation; then
+		return 0
+	fi
+
+	if [[ -t 0 && -t 1 ]]; then
+		echo ""
+		echo -e "${BOLD}Optional CLI tools${NC}"
+		echo "Kaku can install missing tools with Homebrew:"
+		for tool in "${MISSING_TOOLS[@]}"; do
+			echo "  - $tool"
+		done
+		read -p "Install missing tools now? [Y/n] " -n 1 -r
+		echo
+		if [[ $REPLY =~ ^[Nn]$ ]]; then
+			return 0
+		fi
+	else
+		echo -e "${YELLOW}Non-interactive shell detected; skipped optional tool installation.${NC}"
+		return 0
+	fi
+
+	echo "Installing: ${MISSING_TOOLS[*]}"
+	if ! "$BREW_BIN" install --formula --force-bottle "${MISSING_TOOLS[@]}"; then
+		echo -e "${YELLOW}Tool installation failed. You can retry manually:${NC}"
+		echo "  brew install --formula --force-bottle ${MISSING_TOOLS[*]}"
+		return 0
+	fi
+
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed missing CLI tools via Homebrew"
+	return 0
+}
+
+install_missing_tools
+migrate_legacy_binary_if_shadowed "starship"
+migrate_legacy_binary_if_shadowed "delta"
+
+if [[ "$LEGACY_MIGRATED" == "1" ]]; then
+	echo ""
+	echo -e "${YELLOW}One-time action:${NC} run ${BOLD}exec zsh${NC} to reload prompt hooks after migration."
+fi

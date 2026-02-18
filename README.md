@@ -20,7 +20,7 @@
 ## Features
 
 - **Zero Config**: Defaults with JetBrains Mono, opencode theme, macOS font rendering, and low-res font sizing.
-- **Built-in Shell Suite**: Pre-loaded Starship, z, Delta, syntax highlighting, autocompletions, and zsh history.
+- **Curated Shell Suite**: Built-in zsh plugins with optional CLI tools for prompt, diff, and navigation workflows.
 - **Fast & Lightweight**: 40% smaller binary, instant startup, lazy loading, stripped-down GPU-accelerated core.
 - **WezTerm-Compatible Config**: Use WezTerm's Lua config directly with full API compatibility and no migration.
 
@@ -48,6 +48,8 @@ Kaku comes with intuitive macOS-native shortcuts:
 | Zoom/Unzoom Pane | `Cmd + Shift + Enter` |
 | Resize Pane | `Cmd + Ctrl + Arrows` |
 | Clear Screen | `Cmd + K` |
+| Kaku AI Config | `Cmd + Shift + A` |
+| Open Lazygit | `Cmd + Shift + G` |
 | Font Size | `Cmd + +`, `Cmd + -`, `Cmd + 0` |
 | Smart Jump | `z <dir>` |
 | Smart Select | `z -l <dir>` |
@@ -55,14 +57,20 @@ Kaku comes with intuitive macOS-native shortcuts:
 
 ## Configuration
 
-Kaku comes with a carefully curated suite of CLI tools, pre-configured for immediate productivity:
+Kaku comes with a carefully curated shell stack for immediate productivity, so you can focus on AI coding without opening vscode:
 
-- **Starship**: A fast, customizable prompt showing git status, package versions, and execution time.
+Built-in zsh plugins bundled by default:
+
 - **z**: A smarter cd command that learns your most used directories for instant navigation.
-- **Delta**: A syntax-highlighting pager for git, diff, and grep output.
 - **zsh-completions**: Extended command and subcommand completion definitions.
 - **Syntax Highlighting**: Real-time command validation and coloring.
 - **Autosuggestions**: Intelligent, history-based completions similar to Fish shell.
+
+Optional CLI tools installed via Homebrew during `kaku init`:
+
+- **Starship**: A fast, customizable prompt showing git status, package versions, and execution time.
+- **Delta**: A syntax-highlighting pager for git, diff, and grep output.
+- **Lazygit**: A terminal UI for fast, visual Git workflows without leaving the shell.
 
 Kaku uses `~/.config/kaku/kaku.lua` for configuration, fully compatible with WezTerm's Lua API, with built-in defaults at `Kaku.app/Contents/Resources/kaku.lua` as fallback.
 

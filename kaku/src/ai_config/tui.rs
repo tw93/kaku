@@ -1,8 +1,5 @@
 use anyhow::Context;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -1892,8 +1889,7 @@ fn save_codex_field_at(path: &Path, field_key: &str, new_val: &str) -> anyhow::R
 
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnableMouseCapture).context("enable mouse capture")?;
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -1901,8 +1897,6 @@ pub fn run() -> anyhow::Result<()> {
     let result = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode().context("disable raw mode")?;
-    crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)
-        .context("disable mouse capture")?;
     terminal.show_cursor().context("show cursor")?;
 
     result
