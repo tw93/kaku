@@ -183,6 +183,9 @@ pub fn start_update_checker() {
     if let Ok(false) =
         CHECKER_STARTED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
     {
+        // Initialize the notification system early so macOS shows the permission
+        // dialog on first launch, rather than lazily when a notification fires.
+        wezterm_toast_notification::macos_initialize();
         std::thread::Builder::new()
             .name("update_checker".into())
             .spawn(update_checker)

@@ -349,6 +349,22 @@ mod imp {
         Ok(!String::from_utf8_lossy(&output).trim().is_empty())
     }
 
+    fn relaunch_after_upgrade() -> bool {
+        // Give the system a moment to settle before relaunching.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        match Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg("Kaku")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) => status.success(),
+            Err(_) => false,
+        }
+    }
+
     fn run_brew_upgrade(info: &BrewInfo) -> anyhow::Result<()> {
         match is_brew_cask_outdated(&info.brew_bin, &info.cask_name) {
             Ok(false) => {
@@ -374,6 +390,9 @@ mod imp {
             .status()
             .with_context(|| format!("failed to run brew upgrade for {}", info.cask_name))?;
         if primary.success() {
+            if !relaunch_after_upgrade() {
+                println!("Upgrade completed. Please launch Kaku manually.");
+            }
             return Ok(());
         }
 
@@ -392,6 +411,9 @@ mod imp {
                 format!("failed to run brew upgrade fallback for {}", fallback_name)
             })?;
         if fallback.success() {
+            if !relaunch_after_upgrade() {
+                println!("Upgrade completed. Please launch Kaku manually.");
+            }
             return Ok(());
         }
 
@@ -698,7 +720,14 @@ log "refresh shell integration"
 "$TARGET_CLI" init --update-only >/dev/null 2>&1 || true
 
 log "relaunch app"
-/usr/bin/open "$TARGET_APP" >/dev/null 2>&1 || true
+sleep 2
+if /usr/bin/open "$TARGET_APP" 2>>"$LOG_FILE"; then
+  log "relaunch succeeded"
+else
+  log "relaunch via path failed, retrying by app name"
+  sleep 2
+  /usr/bin/open -a Kaku >>"$LOG_FILE" 2>&1 || log "relaunch by name also failed"
+fi
 
 log "done"
 /bin/rm -f "$0" >/dev/null 2>&1 || true

@@ -1193,7 +1193,7 @@ config.swallow_mouse_click_on_window_focus = true
 -- ===== First Run Experience & Config Version Check =====
 wezterm.on('gui-startup', function(cmd)
   local home = os.getenv("HOME")
-  local current_version = 9  -- Update this when config changes
+  local current_version = 10  -- Update this when config changes
 
   local state_file = home .. "/.config/kaku/state.json"
   local legacy_version_file = home .. "/.config/kaku/.kaku_config_version"

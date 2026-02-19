@@ -102,9 +102,7 @@ pub fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         CENTER.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert
-                | UNAuthorizationOptions::Provisional
-                | UNAuthorizationOptions::Sound,
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &RcBlock::new(|ok: Bool, err| {
                 if ok.is_false() {
                     log::error!(
