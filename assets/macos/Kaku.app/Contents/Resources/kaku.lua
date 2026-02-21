@@ -1409,6 +1409,31 @@ end)
 
 wezterm.on('user-var-changed', function(window, pane, name, value)
   ai_debug_log("user-var-changed name=" .. tostring(name) .. " value=" .. tostring(value))
+  if name == "kaku_last_cmd" then
+    if not pane then
+      return
+    end
+
+    local pane_id_ok, pane_id_value = pcall(function()
+      return pane:pane_id()
+    end)
+    if not pane_id_ok or not pane_id_value then
+      return
+    end
+
+    local pane_id = tostring(pane_id_value)
+    local pane_state = ai_fix_state_by_pane[pane_id]
+    if not pane_state or not pane_state.inflight then
+      return
+    end
+
+    pane_state.inflight = false
+    pane_state.pending_job_id = nil
+    clear_ai_fix_suggestion_state(pane_state)
+    ai_debug_log("user-var-changed cancelled inflight ai fix pane_id=" .. pane_id)
+    return
+  end
+
   if name ~= "kaku_last_exit_code" then
     return
   end
