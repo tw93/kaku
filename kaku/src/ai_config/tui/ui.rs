@@ -45,7 +45,7 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(PURPLE()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" · ", Style::default().fg(MUTED())),
-        Span::styled("AI Config", Style::default().fg(TEXT())),
+        Span::styled("AI Settings", Style::default().fg(TEXT())),
     ]);
     frame.render_widget(Paragraph::new(vec![line, Line::from("")]), area);
 }
@@ -94,7 +94,9 @@ fn render_tools(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let last = fi == tool.fields.len() - 1;
             let connector = if last && !is_selected { "└" } else { marker };
 
-            let val_color = if field.value.starts_with('✓') {
+            let val_color = if field.value.starts_with('✓')
+                || (field.key.contains("API Key") && field.value != "—")
+            {
                 GREEN()
             } else if field.value.starts_with('✗') {
                 RED()

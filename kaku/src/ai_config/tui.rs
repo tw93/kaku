@@ -1,6 +1,10 @@
+use crate::assistant_config;
 use crate::utils::{is_jsonc_path, parse_json_or_jsonc, write_atomic};
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -11,6 +15,7 @@ mod ui;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
+    KakuAssistant,
     ClaudeCode,
     Codex,
     Gemini,
@@ -22,6 +27,7 @@ enum Tool {
 impl Tool {
     fn label(&self) -> &'static str {
         match self {
+            Tool::KakuAssistant => "Kaku Assistant",
             Tool::ClaudeCode => "Claude Code",
             Tool::Codex => "Codex",
             Tool::Gemini => "Gemini CLI",
@@ -34,6 +40,12 @@ impl Tool {
     fn config_path(&self) -> PathBuf {
         let home = config::HOME_DIR.clone();
         match self {
+            Tool::KakuAssistant => assistant_config::assistant_toml_path().unwrap_or_else(|_| {
+                config::HOME_DIR
+                    .join(".config")
+                    .join("kaku")
+                    .join("assistant.toml")
+            }),
             Tool::ClaudeCode => home.join(".claude").join("settings.json"),
             Tool::Codex => home.join(".codex").join("config.toml"),
             Tool::Gemini => home.join(".gemini").join("settings.json"),
@@ -60,7 +72,8 @@ impl Tool {
     }
 }
 
-const ALL_TOOLS: [Tool; 6] = [
+const ALL_TOOLS: [Tool; 7] = [
+    Tool::KakuAssistant,
     Tool::ClaudeCode,
     Tool::Codex,
     Tool::Gemini,
@@ -95,8 +108,27 @@ struct ToolState {
 
 impl ToolState {
     fn load(tool: Tool) -> Self {
-        let path = tool.config_path();
-        if !path.exists() {
+        let path = if tool == Tool::KakuAssistant {
+            match assistant_config::ensure_assistant_toml_exists() {
+                Ok(path) => path,
+                Err(err) => {
+                    return ToolState {
+                        tool,
+                        installed: true,
+                        fields: vec![FieldEntry {
+                            key: "error".into(),
+                            value: err.to_string(),
+                            options: vec![],
+                            editable: false,
+                        }],
+                    };
+                }
+            }
+        } else {
+            tool.config_path()
+        };
+
+        if tool != Tool::KakuAssistant && !path.exists() {
             return ToolState {
                 tool,
                 installed: false,
@@ -121,6 +153,7 @@ impl ToolState {
         };
 
         let fields = match tool {
+            Tool::KakuAssistant => extract_kaku_assistant_fields(&raw),
             Tool::ClaudeCode => {
                 let parsed: serde_json::Value = parse_json_or_jsonc(&raw).unwrap_or_default();
                 extract_claude_code_fields(&parsed)
@@ -168,6 +201,165 @@ fn mask_key(val: &str) -> String {
     }
     // Show first 12 chars and last 4 chars
     format!("{}...{}", &val[..12], &val[val.len() - 4..])
+}
+
+#[derive(Debug, Clone)]
+struct KakuAssistantConfig {
+    enabled: bool,
+    api_key: String,
+    model: String,
+    base_url: String,
+}
+
+impl Default for KakuAssistantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            api_key: String::new(),
+            model: assistant_config::DEFAULT_MODEL.to_string(),
+            base_url: assistant_config::DEFAULT_BASE_URL.to_string(),
+        }
+    }
+}
+
+fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
+    let mut cfg = KakuAssistantConfig::default();
+    let parsed = raw
+        .parse::<toml::Value>()
+        .unwrap_or_else(|_| toml::Value::Table(Default::default()));
+
+    if let Some(enabled) = parsed.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = enabled;
+    }
+    if let Some(api_key) = parsed.get("api_key").and_then(|v| v.as_str()) {
+        cfg.api_key = api_key.to_string();
+    }
+    if let Some(model) = parsed.get("model").and_then(|v| v.as_str()) {
+        if !model.trim().is_empty() {
+            cfg.model = model.to_string();
+        }
+    }
+    if let Some(base_url) = parsed.get("base_url").and_then(|v| v.as_str()) {
+        if !base_url.trim().is_empty() {
+            cfg.base_url = base_url.to_string();
+        }
+    }
+    cfg
+}
+
+fn get_kaku_assistant_api_key() -> Option<String> {
+    let path = assistant_config::ensure_assistant_toml_exists().ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cfg = parse_kaku_assistant_config(&raw);
+    if cfg.api_key.trim().is_empty() {
+        None
+    } else {
+        Some(cfg.api_key)
+    }
+}
+
+fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
+    let cfg = parse_kaku_assistant_config(raw);
+    vec![
+        FieldEntry {
+            key: "Enabled".into(),
+            value: if cfg.enabled {
+                "On".into()
+            } else {
+                "Off".into()
+            },
+            options: vec!["On".into(), "Off".into()],
+            editable: true,
+        },
+        FieldEntry {
+            key: "Model".into(),
+            value: cfg.model,
+            options: vec![],
+            editable: true,
+        },
+        FieldEntry {
+            key: "Base URL".into(),
+            value: cfg.base_url,
+            options: vec![],
+            editable: true,
+        },
+        FieldEntry {
+            key: "API Key".into(),
+            value: mask_key(&cfg.api_key),
+            options: vec![],
+            editable: true,
+        },
+    ]
+}
+
+fn render_toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow::Result<()> {
+    let mut out = String::new();
+    out.push_str("# Kaku Assistant configuration\n");
+    out.push_str(
+        "# enabled: true enables command analysis suggestions; false disables requests.\n",
+    );
+    out.push_str("# api_key: provider API key, example: \"sk-xxxx\".\n");
+    out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n");
+    out.push_str("# base_url: chat-completions API root URL.\n\n");
+    out.push_str(if cfg.enabled {
+        "enabled = true\n"
+    } else {
+        "enabled = false\n"
+    });
+    if cfg.api_key.trim().is_empty() {
+        out.push_str("# api_key = \"<your_api_key>\"\n");
+    } else {
+        out.push_str(&format!(
+            "api_key = {}\n",
+            render_toml_string(cfg.api_key.trim())
+        ));
+    }
+    out.push_str(&format!(
+        "model = {}\n",
+        render_toml_string(cfg.model.trim())
+    ));
+    out.push_str(&format!(
+        "base_url = {}\n",
+        render_toml_string(cfg.base_url.trim())
+    ));
+    write_atomic(path, out.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<()> {
+    let path = assistant_config::ensure_assistant_toml_exists()?;
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut cfg = parse_kaku_assistant_config(&raw);
+
+    match field_key {
+        "Enabled" => {
+            cfg.enabled = matches!(new_val.trim(), "On" | "on" | "true" | "1");
+        }
+        "Model" => {
+            if new_val.trim().is_empty() || new_val == "—" {
+                cfg.model = assistant_config::DEFAULT_MODEL.to_string();
+            } else {
+                cfg.model = new_val.trim().to_string();
+            }
+        }
+        "Base URL" => {
+            if new_val.trim().is_empty() || new_val == "—" {
+                cfg.base_url = assistant_config::DEFAULT_BASE_URL.to_string();
+            } else {
+                cfg.base_url = new_val.trim().to_string();
+            }
+        }
+        "API Key" => {
+            cfg.api_key = new_val.trim().to_string();
+        }
+        _ => return Ok(()),
+    }
+
+    write_kaku_assistant_config(&path, &cfg)
 }
 
 /// Get OpenAI account email from JWT token in auth.json
@@ -1174,6 +1366,17 @@ struct App {
     should_quit: bool,
 }
 
+fn status_value_for_display(field_key: &str, new_val: &str) -> String {
+    if field_key.contains("API Key") {
+        return if new_val.trim().is_empty() {
+            "—".into()
+        } else {
+            mask_key(new_val.trim())
+        };
+    }
+    new_val.to_string()
+}
+
 impl App {
     fn new() -> Self {
         let tools: Vec<ToolState> = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
@@ -1254,6 +1457,7 @@ impl App {
             if field.key == "Auth" || (field.value.starts_with('✓') && !field.key.contains(" ▸ "))
             {
                 let cmd = match tool.tool {
+                    Tool::KakuAssistant => None,
                     Tool::OpenCode => Some("opencode auth"),
                     Tool::Gemini => Some("gemini auth login"),
                     Tool::Codex => Some("codex auth login"),
@@ -1292,6 +1496,8 @@ impl App {
         self.edit_buf = if field.value == "—" {
             // Empty placeholder
             String::new()
+        } else if tool.tool == Tool::KakuAssistant && field.key == "API Key" {
+            get_kaku_assistant_api_key().unwrap_or_else(String::new)
         } else if field.key.contains("API Key") && !field.key.contains(" ▸ ") {
             // OpenCode provider API Key from opencode.json - keep masked value behavior
             String::new()
@@ -1332,8 +1538,9 @@ impl App {
         tool.fields[self.field_index].value = new_val.clone();
 
         let field_key = tool.fields[self.field_index].key.clone();
+        let status_val = status_value_for_display(&field_key, &new_val);
         match save_field(tool.tool, &field_key, &new_val) {
-            Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, new_val)),
+            Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, status_val)),
             Err(e) => self.status_msg = Some(format!("Save failed: {}", e)),
         }
         self.reload_current_tool();
@@ -1371,8 +1578,9 @@ impl App {
 
         tool.fields[self.field_index].value = new_val.clone();
 
+        let status_val = status_value_for_display(&field_key, &new_val);
         match save_field(tool.tool, &field_key, &new_val) {
-            Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, new_val)),
+            Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, status_val)),
             Err(e) => self.status_msg = Some(format!("Save failed: {}", e)),
         }
         self.reload_current_tool();
@@ -1453,6 +1661,10 @@ impl App {
 }
 
 fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> {
+    if tool == Tool::KakuAssistant {
+        return save_kaku_assistant_field(field_key, new_val);
+    }
+
     // Codex uses TOML; delegate immediately before any JSON parsing attempt.
     if tool == Tool::Codex {
         return save_codex_field(field_key, new_val);
@@ -1468,6 +1680,7 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
         parse_json_or_jsonc(&raw).with_context(|| format!("parse {}", path.display()))?;
 
     match tool {
+        Tool::KakuAssistant => unreachable!("Kaku Assistant is handled before JSON parsing"),
         Tool::Gemini => {
             if field_key == "Model" {
                 if let Some(obj) = parsed.as_object_mut() {
@@ -1826,6 +2039,7 @@ fn save_codex_field_at(path: &Path, field_key: &str, new_val: &str) -> anyhow::R
 
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
+    crossterm::execute!(io::stdout(), EnableBracketedPaste).context("enable bracketed paste")?;
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
@@ -1833,6 +2047,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     let result = run_loop(&mut terminal, &mut app);
 
+    let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
     disable_raw_mode().context("disable raw mode")?;
     terminal.show_cursor().context("show cursor")?;
 
@@ -1945,6 +2160,21 @@ fn run_loop(
                 MouseEventKind::ScrollDown => app.move_down(),
                 _ => {}
             },
+            Event::Paste(text) => {
+                if !app.editing || text.is_empty() {
+                    continue;
+                }
+
+                // Clipboard paste may include a trailing newline from terminal copy.
+                // Strip line breaks so paste doesn't immediately trigger submit behavior.
+                let cleaned: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                if cleaned.is_empty() {
+                    continue;
+                }
+                for c in cleaned.chars() {
+                    edit_insert_char(&mut app.edit_buf, &mut app.edit_cursor, c);
+                }
+            }
             _ => {}
         }
 
