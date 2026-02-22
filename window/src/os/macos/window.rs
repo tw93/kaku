@@ -345,7 +345,21 @@ mod cglbits {
         fn swap_buffers(&self) -> Result<(), glium::SwapBuffersError> {
             unsafe {
                 let pool = NSAutoreleasePool::new(nil);
-                self.gl_context.flushBuffer();
+                // Rebind the drawable before presenting. During sleep/wake or
+                // display reconfiguration macOS can invalidate the previous
+                // surface while keeping the context current.
+                let _: () = msg_send![*self.gl_context, update];
+                let view = self.gl_context.view();
+                if !view.is_null() {
+                    let window: id = msg_send![view, window];
+                    if !window.is_null() {
+                        self.gl_context.flushBuffer();
+                    } else {
+                        log::trace!("skip flushBuffer: NSView has no NSWindow");
+                    }
+                } else {
+                    log::trace!("skip flushBuffer: NSOpenGLContext has no view");
+                }
                 let _: () = msg_send![pool, release];
             }
             Ok(())
@@ -3324,6 +3338,11 @@ impl WindowView {
                 // Keypad enter sends ctrl-c for some reason; explicitly
                 // treat that as enter here.
                 (true, "\r")
+            } else if is_non_menu_virtual_key(virtual_key) {
+                // Navigation/function keys can surface here as composed strings
+                // with modifier-dependent escape fragments. Prefer vkey mapping
+                // so they normalize into stable key codes.
+                (true, unmod)
             } else {
                 (false, unmod)
             };

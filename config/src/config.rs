@@ -446,6 +446,10 @@ pub struct Config {
     pub mouse_bindings: Vec<Mouse>,
     #[dynamic(default)]
     pub disable_default_mouse_bindings: bool,
+    /// When false, completing a mouse text selection will not copy text
+    /// to the clipboard and will not show copy toast notifications.
+    #[dynamic(default = "default_true")]
+    pub copy_on_select: bool,
 
     #[dynamic(default)]
     pub daemon_options: DaemonOptions,

@@ -194,6 +194,102 @@ setopt EXTENDED_HISTORY          # Include timestamps in saved history
 setopt interactive_comments
 bindkey -e
 
+# Kaku line-selection widgets for modified arrows in prompt editing.
+_kaku_select_left_char() {
+    emulate -L zsh
+    if (( ! REGION_ACTIVE )); then
+        zle set-mark-command
+    fi
+    zle backward-char
+}
+_kaku_select_right_char() {
+    emulate -L zsh
+    if (( ! REGION_ACTIVE )); then
+        zle set-mark-command
+    fi
+    zle forward-char
+}
+_kaku_select_line_start() {
+    emulate -L zsh
+    if (( ! REGION_ACTIVE )); then
+        zle set-mark-command
+    fi
+    zle beginning-of-line
+}
+_kaku_select_line_end() {
+    emulate -L zsh
+    if (( ! REGION_ACTIVE )); then
+        zle set-mark-command
+    fi
+    zle end-of-line
+}
+_kaku_has_active_region() {
+    emulate -L zsh
+    if (( REGION_ACTIVE )); then
+        return 0
+    fi
+    # Ctrl-Space often sets MARK without toggling REGION_ACTIVE in emacs mode.
+    if (( MARK != CURSOR )); then
+        return 0
+    fi
+    return 1
+}
+_kaku_deactivate_region() {
+    emulate -L zsh
+    if ! _kaku_has_active_region; then
+        return 1
+    fi
+    if (( ${+widgets[deactivate-region]} )); then
+        zle deactivate-region
+    else
+        MARK=$CURSOR
+        REGION_ACTIVE=0
+        zle redisplay
+    fi
+    return 0
+}
+_kaku_backspace_or_kill_region() {
+    emulate -L zsh
+    if _kaku_has_active_region; then
+        zle kill-region
+    else
+        zle backward-delete-char
+    fi
+}
+_kaku_delete_or_kill_region() {
+    emulate -L zsh
+    if _kaku_has_active_region; then
+        zle kill-region
+    else
+        zle delete-char
+    fi
+}
+_kaku_send_break_or_deactivate_region() {
+    emulate -L zsh
+    if ! _kaku_deactivate_region; then
+        zle send-break
+    fi
+}
+zle -N _kaku_select_left_char
+zle -N _kaku_select_right_char
+zle -N _kaku_select_line_start
+zle -N _kaku_select_line_end
+zle -N _kaku_backspace_or_kill_region
+zle -N _kaku_delete_or_kill_region
+zle -N _kaku_send_break_or_deactivate_region
+
+# Shift+Left/Right: char expand; Shift+Home/End: to line boundary.
+bindkey '^[[1;2D' _kaku_select_left_char
+bindkey '^[[1;2C' _kaku_select_right_char
+bindkey '^[[1;2H' _kaku_select_line_start
+bindkey '^[[1;2F' _kaku_select_line_end
+
+# Backspace/Delete: prefer deleting active region, otherwise normal behavior.
+bindkey '^?' _kaku_backspace_or_kill_region
+bindkey '^H' _kaku_backspace_or_kill_region
+bindkey '^[[3~' _kaku_delete_or_kill_region
+bindkey '^G' _kaku_send_break_or_deactivate_region
+
 # Directory Navigation Options
 setopt auto_cd
 setopt auto_pushd

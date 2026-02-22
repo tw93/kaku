@@ -512,6 +512,25 @@ struct SplitDragState {
     tab_id: TabId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEditorSelectionDirection {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEditorSelectionState {
+    None,
+    Charwise {
+        direction: LineEditorSelectionDirection,
+        count: usize,
+    },
+    ToStart,
+    ToEnd,
+    All,
+    Unknown,
+}
+
 pub struct TermWindow {
     pub window: Option<Window>,
     pub config: ConfigHandle,
@@ -553,6 +572,8 @@ pub struct TermWindow {
     current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
     last_scroll_info: RenderableDimensions,
+    line_editor_selection: LineEditorSelectionState,
+    line_editor_selection_owner: Option<PaneId>,
 
     tab_state: RefCell<HashMap<TabId, TabState>>,
     pane_state: RefCell<HashMap<PaneId, PaneState>>,
@@ -884,6 +905,8 @@ impl TermWindow {
             current_modifier_and_leds: Default::default(),
             prev_cursor: PrevCursorPos::new(),
             last_scroll_info: RenderableDimensions::default(),
+            line_editor_selection: LineEditorSelectionState::None,
+            line_editor_selection_owner: None,
             tab_state: RefCell::new(HashMap::new()),
             pane_state: RefCell::new(HashMap::new()),
             current_mouse_buttons: vec![],
@@ -3172,15 +3195,17 @@ impl TermWindow {
             CompleteSelectionOrOpenLinkAtMouseCursor(dest) => {
                 let text = self.selection_text(pane);
                 if !text.is_empty() {
-                    self.copy_to_clipboard(*dest, text);
-                    self.show_copy_toast();
+                    if self.config.copy_on_select {
+                        self.copy_to_clipboard(*dest, text);
+                        self.show_copy_toast();
+                    }
                 } else {
                     self.do_open_link_at_mouse_cursor(pane);
                 }
             }
             CompleteSelection(dest) => {
                 let text = self.selection_text(pane);
-                if !text.is_empty() {
+                if !text.is_empty() && self.config.copy_on_select {
                     self.copy_to_clipboard(*dest, text);
                     self.show_copy_toast();
                 }

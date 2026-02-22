@@ -4,7 +4,7 @@ use ::window::{
 };
 use anyhow::Context;
 use config::keyassignment::{KeyAssignment, KeyTableEntry};
-use mux::pane::{Pane, PerformAssignmentResult};
+use mux::pane::{Pane, PaneId, PerformAssignmentResult};
 use smol::Timer;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -188,6 +188,82 @@ enum OnlyKeyBindings {
 }
 
 impl super::TermWindow {
+    fn clear_line_editor_selection(&mut self) {
+        self.line_editor_selection = super::LineEditorSelectionState::None;
+        self.line_editor_selection_owner = None;
+    }
+
+    fn has_line_editor_selection(&self) -> bool {
+        self.line_editor_selection != super::LineEditorSelectionState::None
+    }
+
+    fn ensure_line_editor_selection_for_pane(&mut self, pane_id: PaneId) {
+        if self.has_line_editor_selection() && self.line_editor_selection_owner != Some(pane_id) {
+            self.clear_line_editor_selection();
+        }
+    }
+
+    fn sync_line_editor_selection_owner(&mut self, pane_id: PaneId) {
+        self.line_editor_selection_owner = if self.has_line_editor_selection() {
+            Some(pane_id)
+        } else {
+            None
+        };
+    }
+
+    fn extend_line_editor_charwise(&mut self, direction: super::LineEditorSelectionDirection) {
+        use super::LineEditorSelectionState as Sel;
+
+        self.line_editor_selection = match self.line_editor_selection {
+            Sel::None => Sel::Charwise {
+                direction,
+                count: 1,
+            },
+            Sel::Charwise {
+                direction: existing,
+                count,
+            } if existing == direction => Sel::Charwise {
+                direction,
+                count: count.saturating_add(1),
+            },
+            Sel::Charwise {
+                direction: existing,
+                count,
+            } => {
+                if count > 1 {
+                    Sel::Charwise {
+                        direction: existing,
+                        count: count - 1,
+                    }
+                } else {
+                    Sel::None
+                }
+            }
+            Sel::ToStart | Sel::ToEnd | Sel::All | Sel::Unknown => Sel::Unknown,
+        };
+    }
+
+    fn bytes_for_line_editor_selection_delete(&self) -> Option<Vec<u8>> {
+        use super::{LineEditorSelectionDirection as Dir, LineEditorSelectionState as Sel};
+
+        let bytes = match self.line_editor_selection {
+            Sel::None => return None,
+            Sel::Charwise {
+                direction: Dir::Left,
+                count,
+            } => vec![0x04; count], // Cursor is at left edge of the region; delete forward.
+            Sel::Charwise {
+                direction: Dir::Right,
+                count,
+            } => vec![0x7f; count], // Cursor is at right edge of the region; delete backward.
+            Sel::ToStart => vec![0x18, 0x18, 0x15], // C-x C-x, C-u
+            Sel::ToEnd => vec![0x18, 0x18, 0x0b],   // C-x C-x, C-k
+            Sel::All => vec![0x15],                 // C-u
+            Sel::Unknown => return None,
+        };
+        Some(bytes)
+    }
+
     fn encode_win32_input(&self, pane: &Arc<dyn Pane>, key: &KeyEvent) -> Option<String> {
         if !self.config.allow_win32_input_mode
             || pane.get_keyboard_encoding() != KeyboardEncoding::Win32
@@ -477,6 +553,11 @@ impl super::TermWindow {
                 key.key_is_down,
                 None,
             ) {
+                if self.pane_state(pane.pane_id()).overlay.is_none() && !leader_active {
+                    self.ensure_line_editor_selection_for_pane(pane.pane_id());
+                    self.track_line_editor_selection_shortcut_raw(&key);
+                    self.sync_line_editor_selection_owner(pane.pane_id());
+                }
                 key.set_handled();
                 return;
             }
@@ -498,6 +579,11 @@ impl super::TermWindow {
             key.key_is_down,
             None,
         ) {
+            if self.pane_state(pane.pane_id()).overlay.is_none() && !leader_active {
+                self.ensure_line_editor_selection_for_pane(pane.pane_id());
+                self.track_line_editor_selection_shortcut_raw(&key);
+                self.sync_line_editor_selection_owner(pane.pane_id());
+            }
             key.set_handled();
             return;
         }
@@ -519,6 +605,11 @@ impl super::TermWindow {
             key.key_is_down,
             None,
         ) {
+            if self.pane_state(pane.pane_id()).overlay.is_none() && !leader_active {
+                self.ensure_line_editor_selection_for_pane(pane.pane_id());
+                self.track_line_editor_selection_shortcut_raw(&key);
+                self.sync_line_editor_selection_owner(pane.pane_id());
+            }
             key.set_handled();
         }
     }
@@ -592,6 +683,196 @@ impl super::TermWindow {
         }
     }
 
+    fn maybe_handle_native_line_editor_shortcut(
+        &mut self,
+        pane: &Arc<dyn Pane>,
+        window_key: &KeyEvent,
+        context: &dyn WindowOps,
+    ) -> bool {
+        use super::{LineEditorSelectionDirection as Dir, LineEditorSelectionState as Sel};
+        use ::window::KeyCode as WK;
+
+        let is_shift_key = matches!(window_key.key, WK::Shift | WK::LeftShift | WK::RightShift);
+        if !window_key.key_is_down {
+            if is_shift_key {
+                self.clear_line_editor_selection();
+            }
+            return false;
+        }
+
+        self.ensure_line_editor_selection_for_pane(pane.pane_id());
+
+        let mods = window_key.modifiers.remove_positional_mods();
+        let mut out: Vec<u8> = Vec::new();
+        let mut handled = true;
+        let mut keep_selection_anchor = false;
+
+        let ensure_mark = |buf: &mut Vec<u8>, anchor_active: bool| {
+            if !anchor_active {
+                // Ctrl-Space (NUL) sets the mark in readline/zle emacs mode.
+                buf.push(0x00);
+            }
+        };
+
+        match (&window_key.key, mods) {
+            (WK::LeftArrow | WK::ApplicationLeftArrow, Modifiers::SHIFT) => {
+                ensure_mark(&mut out, self.has_line_editor_selection());
+                out.push(0x02); // Ctrl-B
+                self.extend_line_editor_charwise(Dir::Left);
+                keep_selection_anchor = self.has_line_editor_selection();
+            }
+            (WK::RightArrow | WK::ApplicationRightArrow, Modifiers::SHIFT) => {
+                ensure_mark(&mut out, self.has_line_editor_selection());
+                out.push(0x06); // Ctrl-F
+                self.extend_line_editor_charwise(Dir::Right);
+                keep_selection_anchor = self.has_line_editor_selection();
+            }
+            (WK::LeftArrow | WK::ApplicationLeftArrow, m)
+                if m == (Modifiers::SUPER | Modifiers::SHIFT) =>
+            {
+                let had_selection = self.has_line_editor_selection();
+                ensure_mark(&mut out, had_selection);
+                out.push(0x01); // Ctrl-A
+                self.line_editor_selection = Sel::ToStart;
+                keep_selection_anchor = true;
+            }
+            (WK::RightArrow | WK::ApplicationRightArrow, m)
+                if m == (Modifiers::SUPER | Modifiers::SHIFT) =>
+            {
+                let had_selection = self.has_line_editor_selection();
+                ensure_mark(&mut out, had_selection);
+                out.push(0x05); // Ctrl-E
+                self.line_editor_selection = Sel::ToEnd;
+                keep_selection_anchor = true;
+            }
+            (WK::Char('a') | WK::Char('A'), Modifiers::SUPER) => {
+                out.push(0x01); // Ctrl-A
+                out.push(0x00); // Ctrl-Space
+                out.push(0x05); // Ctrl-E
+                self.line_editor_selection = Sel::All;
+                keep_selection_anchor = true;
+            }
+            (WK::Char('\u{1b}'), Modifiers::NONE) if self.has_line_editor_selection() => {
+                // Collapse region by setting mark at the current point.
+                out.push(0x00); // Ctrl-Space
+                self.clear_line_editor_selection();
+                keep_selection_anchor = false;
+            }
+            (WK::Char('\u{8}') | WK::Char('\u{7f}'), _) if self.has_line_editor_selection() => {
+                if let Some(bytes) = self.bytes_for_line_editor_selection_delete() {
+                    out.extend_from_slice(&bytes);
+                    self.clear_line_editor_selection();
+                    keep_selection_anchor = false;
+                } else {
+                    handled = false;
+                }
+            }
+            _ => handled = false,
+        }
+
+        if !handled {
+            self.clear_line_editor_selection();
+            return false;
+        }
+
+        let res = pane
+            .writer()
+            .write_all(out.as_slice())
+            .context("sending native line-editor shortcut bytes");
+        if let Err(err) = res {
+            log::warn!("{err:#}");
+            self.clear_line_editor_selection();
+            return false;
+        }
+
+        if !keep_selection_anchor {
+            self.clear_line_editor_selection();
+        } else {
+            self.sync_line_editor_selection_owner(pane.pane_id());
+        }
+        self.maybe_scroll_to_bottom_for_input(pane);
+        if self.config.hide_mouse_cursor_when_typing {
+            context.set_cursor(None);
+        }
+        context.invalidate();
+
+        if self.config.debug_key_events {
+            log::info!(
+                "native-line-editor shortcut key={:?} mods={:?} bytes={:?} selection={:?}",
+                window_key.key,
+                mods,
+                out,
+                self.line_editor_selection
+            );
+        }
+
+        true
+    }
+
+    fn track_line_editor_selection_shortcut(&mut self, window_key: &KeyEvent) {
+        use super::{LineEditorSelectionDirection as Dir, LineEditorSelectionState as Sel};
+        use ::window::KeyCode as WK;
+
+        if !window_key.key_is_down {
+            if matches!(window_key.key, WK::Shift | WK::LeftShift | WK::RightShift) {
+                self.clear_line_editor_selection();
+            }
+            return;
+        }
+
+        let mods = window_key.modifiers.remove_positional_mods();
+        match (&window_key.key, mods) {
+            (WK::LeftArrow | WK::ApplicationLeftArrow, Modifiers::SHIFT) => {
+                self.extend_line_editor_charwise(Dir::Left);
+            }
+            (WK::RightArrow | WK::ApplicationRightArrow, Modifiers::SHIFT) => {
+                self.extend_line_editor_charwise(Dir::Right);
+            }
+            (WK::LeftArrow | WK::ApplicationLeftArrow, m)
+                if m == (Modifiers::SUPER | Modifiers::SHIFT) =>
+            {
+                self.line_editor_selection = Sel::ToStart;
+            }
+            (WK::RightArrow | WK::ApplicationRightArrow, m)
+                if m == (Modifiers::SUPER | Modifiers::SHIFT) =>
+            {
+                self.line_editor_selection = Sel::ToEnd;
+            }
+            (WK::Char('a') | WK::Char('A'), Modifiers::SUPER) => {
+                self.line_editor_selection = Sel::All;
+            }
+            _ => {
+                // Any other handled shortcut should not keep stale selection state.
+                self.clear_line_editor_selection();
+            }
+        }
+    }
+
+    fn track_line_editor_selection_shortcut_raw(&mut self, key: &RawKeyEvent) {
+        use super::LineEditorSelectionState as Sel;
+        use ::window::PhysKeyCode as PK;
+
+        if !key.key_is_down {
+            return;
+        }
+
+        let mods = key.modifiers.remove_positional_mods();
+        match (key.phys_code, mods) {
+            (Some(PK::A), Modifiers::SUPER) => {
+                self.line_editor_selection = Sel::All;
+            }
+            (Some(PK::LeftArrow), m) if m == (Modifiers::SUPER | Modifiers::SHIFT) => {
+                self.line_editor_selection = Sel::ToStart;
+            }
+            (Some(PK::RightArrow), m) if m == (Modifiers::SUPER | Modifiers::SHIFT) => {
+                self.line_editor_selection = Sel::ToEnd;
+            }
+            _ => {
+                self.clear_line_editor_selection();
+            }
+        }
+    }
+
     pub fn key_event_impl(&mut self, window_key: KeyEvent, context: &dyn WindowOps) {
         let pane = match self.get_active_pane_or_overlay() {
             Some(pane) => pane,
@@ -659,6 +940,11 @@ impl super::TermWindow {
             window_key.key_is_down,
             Some(&window_key),
         ) {
+            if self.pane_state(pane.pane_id()).overlay.is_none() && !leader_active {
+                self.ensure_line_editor_selection_for_pane(pane.pane_id());
+                self.track_line_editor_selection_shortcut(&window_key);
+                self.sync_line_editor_selection_owner(pane.pane_id());
+            }
             return;
         }
 
@@ -667,6 +953,16 @@ impl super::TermWindow {
         // entries from the stack.
         if window_key.key_is_down {
             self.key_table_state.pop_until_unknown();
+        }
+
+        // Fallback for shell prompt line-editing habits on macOS.
+        // We intentionally emit readline/zle emacs controls here so that
+        // behavior works even when modified cursor CSI sequences are not bound.
+        if self.pane_state(pane.pane_id()).overlay.is_none()
+            && !leader_active
+            && self.maybe_handle_native_line_editor_shortcut(&pane, &window_key, context)
+        {
+            return;
         }
 
         let key = self.win_key_code_to_termwiz_key_code(&window_key.key);
@@ -720,6 +1016,12 @@ impl super::TermWindow {
                         && !key.is_modifier()
                         && self.pane_state(pane.pane_id()).overlay.is_none()
                     {
+                        self.clear_line_editor_selection();
+                    }
+                    if window_key.key_is_down
+                        && !key.is_modifier()
+                        && self.pane_state(pane.pane_id()).overlay.is_none()
+                    {
                         self.maybe_scroll_to_bottom_for_input(&pane);
                     }
                     if window_key.key_is_down
@@ -751,6 +1053,7 @@ impl super::TermWindow {
                 if let Err(err) = pane.writer().write_all(s.as_bytes()) {
                     log::warn!("sending composed input failed: {err:#}");
                 }
+                self.clear_line_editor_selection();
                 self.maybe_scroll_to_bottom_for_input(&pane);
                 context.invalidate();
             }

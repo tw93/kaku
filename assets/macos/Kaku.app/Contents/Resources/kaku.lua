@@ -2080,6 +2080,7 @@ config.keys = {
 }
 
 -- Copy on select (equivalent to Kitty's copy_on_select)
+-- config.copy_on_select = false -- uncomment to disable copy and toast on selection
 config.mouse_bindings = {
   {
     event = { Up = { streak = 1, button = 'Left' } },
