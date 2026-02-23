@@ -1,6 +1,6 @@
 //! Bridge our gui config into the terminal crate configuration
 
-use crate::{configuration, ConfigHandle, NewlineCanon};
+use crate::{ConfigHandle, NewlineCanon, configuration};
 use std::sync::Mutex;
 use termwiz::cell::UnicodeVersion;
 use wezterm_term::color::ColorPalette;

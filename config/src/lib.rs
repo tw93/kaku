@@ -1,6 +1,6 @@
 //! Configuration for the gui portion of the terminal
 
-use anyhow::{anyhow, bail, Context, Error};
+use anyhow::{Context, Error, anyhow, bail};
 use lazy_static::lazy_static;
 use mlua::Lua;
 use ordered_float::NotNan;
@@ -501,6 +501,27 @@ pub fn ensure_user_config_exists() -> anyhow::Result<PathBuf> {
     Ok(config_path)
 }
 
+/// Atomically writes data to a file using a temporary file and rename.
+///
+/// This function ensures that the file is either completely written or not modified at all,
+/// preventing partial writes from the *application's* perspective (process crash). It creates
+/// a temporary file in the same directory as the target, writes the data, flushes OS buffers
+/// (not necessarily to disk), then renames the temp file to the target atomically.
+///
+/// Note: This does not guarantee durability against power failures (no fsync/sync_all).
+/// For config files this is usually acceptable; use sync_all if you need full durability.
+///
+/// # Arguments
+/// * `path` - The target file path
+/// * `data` - The bytes to write
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err` if any step fails (directory creation, temp file creation, write, flush, or rename)
+///
+/// # Retry Logic
+/// If the temp file already exists (e.g., from a previous interrupted attempt), it will
+/// retry with a different suffix up to 8 times before giving up.
 fn write_new_file_atomic(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -510,6 +531,9 @@ fn write_new_file_atomic(path: &Path, data: &[u8]) -> anyhow::Result<()> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid atomic write file name: {}", path.display()))?;
 
+    // Note: unwrap_or_default is safe here because PID + attempt counter ensure
+    // uniqueness even if the system clock is before UNIX_EPOCH (which would
+    // only happen with severe clock misconfiguration).
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -12,8 +12,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU8, Ordering};
 use wezterm_dynamic::{FromDynamic, FromDynamicOptions, ToDynamic, Value};
 use wezterm_input_types::{KeyCode, Modifiers};
-use wezterm_term::input::MouseButton;
 use wezterm_term::SemanticType;
+use wezterm_term::input::MouseButton;
 
 static LAST_PANE_ENCODING: AtomicU8 = AtomicU8::new(0);
 

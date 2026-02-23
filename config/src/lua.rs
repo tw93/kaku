@@ -4,7 +4,7 @@ use crate::{
     Config, FontAttributes, FontStretch, FontStyle, FontWeight, FreeTypeLoadTarget, RgbaColor,
     TextStyle,
 };
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use luahelper::{from_lua_value_dynamic, lua_value_to_dynamic, to_lua};
 use mlua::{FromLua, IntoLuaMulti, Lua, Table, Value, Variadic};
 use ordered_float::NotNan;
@@ -675,7 +675,7 @@ fn exec_domain<'lua>(
         Some(_) => {
             return Err(mlua::Error::external(
                 "label function parameter must be either a string or a lua function",
-            ))
+            ));
         }
         None => None,
     };

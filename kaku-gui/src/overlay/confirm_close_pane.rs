@@ -1,10 +1,10 @@
 use super::confirm;
 use crate::TermWindow;
+use mux::Mux;
 use mux::pane::PaneId;
 use mux::tab::TabId;
 use mux::termwiztermtab::TermWizTerminal;
 use mux::window::WindowId;
-use mux::Mux;
 
 pub fn confirm_close_pane(
     pane_id: PaneId,
@@ -49,6 +49,11 @@ pub fn confirm_close_tab(
     Ok(())
 }
 
+/// Shows a confirmation dialog before closing a window.
+///
+/// Note: This is excluded on macOS (`#[cfg(not(target_os = "macos"))]`) because macOS
+/// provides native window close confirmation dialogs via the AppDelegate, making
+/// this custom overlay redundant on that platform.
 #[cfg(not(target_os = "macos"))]
 pub fn confirm_close_window(
     mut term: TermWizTerminal,
