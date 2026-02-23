@@ -2229,6 +2229,16 @@ struct TranslateResults {
     text: String,
 }
 
+fn is_unicode_noncharacter(c: char) -> bool {
+    let cp = c as u32;
+    (0xFDD0..=0xFDEF).contains(&cp) || (cp & 0xFFFE) == 0xFFFE
+}
+
+fn is_dead_key_placeholder_text(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if is_unicode_noncharacter(c))
+}
+
 impl Keyboard {
     pub fn new() -> Self {
         let _kbd =
@@ -2289,9 +2299,12 @@ impl Keyboard {
             )
         };
 
-        let text = String::from_utf16(unsafe {
+        let mut text = String::from_utf16(unsafe {
             std::slice::from_raw_parts(unicode_buffer.as_mut_ptr(), length as _)
         })?;
+        if is_dead_key_placeholder_text(&text) {
+            text.clear();
+        }
 
         Ok(TranslateResults { text, dead_state })
     }
@@ -3335,6 +3348,19 @@ impl WindowView {
         let is_a_repeat = unsafe { nsevent.isARepeat() == YES };
         let chars = unsafe { nsstring_to_str(nsevent.characters()) };
         let unmod = unsafe { nsstring_to_str(nsevent.charactersIgnoringModifiers()) };
+        // Some macOS keyboard layouts surface dead-key presses as a single
+        // Unicode noncharacter placeholder instead of an empty string. Treat it
+        // the same as empty so the existing dead-key translation path handles it.
+        let chars = if is_dead_key_placeholder_text(chars) {
+            ""
+        } else {
+            chars
+        };
+        let unmod = if is_dead_key_placeholder_text(unmod) {
+            ""
+        } else {
+            unmod
+        };
         let modifier_flags = unsafe { nsevent.modifierFlags() };
         let modifiers = key_modifiers(modifier_flags);
         let leds = if modifier_flags.bits() & (1 << 16) != 0 {
