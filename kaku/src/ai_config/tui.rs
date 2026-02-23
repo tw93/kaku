@@ -1042,8 +1042,6 @@ fn extract_copilot_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     fields
 }
 
-
-
 fn extract_factory_droid_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     let session_defaults = val
         .get("sessionDefaultSettings")
@@ -1594,44 +1592,15 @@ impl App {
         }
     }
 
-    fn is_select_option_selectable(&self, _index: usize) -> bool {
-        // All options are selectable for other tools
-        true
-    }
-
-    fn first_selectable_option_index(&self) -> usize {
-        self.select_options
-            .iter()
-            .enumerate()
-            .find_map(|(idx, _)| self.is_select_option_selectable(idx).then_some(idx))
-            .unwrap_or(0)
-    }
-
     fn move_select_up(&mut self) {
-        if self.select_options.is_empty() {
-            return;
-        }
-        let mut idx = self.select_index.min(self.select_options.len() - 1);
-        while idx > 0 {
-            idx -= 1;
-            if self.is_select_option_selectable(idx) {
-                self.select_index = idx;
-                return;
-            }
+        if self.select_index > 0 {
+            self.select_index -= 1;
         }
     }
 
     fn move_select_down(&mut self) {
-        if self.select_options.is_empty() {
-            return;
-        }
-        let mut idx = self.select_index.min(self.select_options.len() - 1);
-        while idx + 1 < self.select_options.len() {
-            idx += 1;
-            if self.is_select_option_selectable(idx) {
-                self.select_index = idx;
-                return;
-            }
+        if self.select_index + 1 < self.select_options.len() {
+            self.select_index += 1;
         }
     }
 
@@ -1681,9 +1650,6 @@ impl App {
                 .iter()
                 .position(|o| *o == field.value)
                 .unwrap_or(0);
-            if !self.is_select_option_selectable(self.select_index) {
-                self.select_index = self.first_selectable_option_index();
-            }
             self.focus = Focus::Editor;
             return;
         }
@@ -1726,9 +1692,6 @@ impl App {
             return;
         }
         if self.select_index >= self.select_options.len() {
-            return;
-        }
-        if !self.is_select_option_selectable(self.select_index) {
             return;
         }
 

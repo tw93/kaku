@@ -306,11 +306,7 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, opt)| {
             let is_sel = i == app.select_index;
-            let marker = if is_sel {
-                "▸ "
-            } else {
-                "  "
-            };
+            let marker = if is_sel { "▸ " } else { "  " };
             let style = if is_sel {
                 Style::default().fg(PURPLE()).add_modifier(Modifier::BOLD)
             } else {
