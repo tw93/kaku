@@ -363,7 +363,13 @@ impl CommandDef {
                     | TogglePaneZoomState
                     | AdjustPaneSize(_, _)
                     | ActivatePaneDirection(_)
-            ) || matches!(action, EmitEvent(name) if name == "kaku-launch-lazygit" || name == "run-kaku-ai-config")
+            ) || matches!(
+                action,
+                EmitEvent(name)
+                    if name == "kaku-launch-lazygit"
+                        || name == "kaku-launch-yazi"
+                        || name == "run-kaku-ai-config"
+            )
         }
 
         fn is_familiar_action(action: &KeyAssignment) -> bool {
@@ -676,6 +682,7 @@ impl CommandDef {
                     SpawnTab(_) | SpawnCommandInNewTab(_) => 20,
                     EmitEvent(name) if name == "run-kaku-ai-config" => 21,
                     EmitEvent(name) if name == "kaku-launch-lazygit" => 22,
+                    EmitEvent(name) if name == "kaku-launch-yazi" => 23,
                     SplitVertical(_) | SplitHorizontal(_) | SplitPane(_) => 30,
                     CloseCurrentTab { .. } | CloseCurrentPane { .. } => 40,
                     ShowLauncher | ShowLauncherArgs(_) => 50,
@@ -744,7 +751,7 @@ impl CommandDef {
             match title {
                 "Shell" => match rank {
                     0..=20 => 1,  // New Window, New Tab
-                    21..=25 => 2, // AI Config, Lazygit
+                    21..=25 => 2, // AI Config, Lazygit, Yazi
                     26..=35 => 3, // Split
                     36..=45 => 4, // Close
                     46..=55 => 5, // Launcher
@@ -1478,6 +1485,15 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                     brief: "Lazygit".into(),
                     doc: "Open lazygit".into(),
                     keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "g".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: None,
+                }
+            } else if name == "kaku-launch-yazi" {
+                CommandDef {
+                    brief: "Yazi".into(),
+                    doc: "Open Yazi file manager".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "y".into())],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,
@@ -2415,6 +2431,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         SpawnWindow,
         EmitEvent("run-kaku-ai-config".to_string()),
         EmitEvent("kaku-launch-lazygit".to_string()),
+        EmitEvent("kaku-launch-yazi".to_string()),
         SplitVertical(SpawnCommand {
             domain: SpawnTabDomain::CurrentPaneDomain,
             ..Default::default()
