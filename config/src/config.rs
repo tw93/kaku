@@ -1228,8 +1228,7 @@ impl Config {
                         .map_err(&map_lua_err)?;
                     let bytecode = func.dump(true);
                     Self::save_bytecode_cache(p, &bytecode);
-                    smol::block_on(func.call_async::<_, mlua::Value>(()))
-                        .map_err(&map_lua_err)?
+                    smol::block_on(func.call_async::<_, mlua::Value>(())).map_err(&map_lua_err)?
                 };
 
                 let config = Config::apply_overrides_to(&lua, config)?;
