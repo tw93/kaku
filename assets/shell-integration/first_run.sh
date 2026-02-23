@@ -172,7 +172,6 @@ fi
 
 echo -e "\n\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"
 
-# `exec` replaces the shell process and skips EXIT trap handlers.
 # Persist explicitly here so successful first-run/upgrade paths are recorded.
 persist_config_version
 

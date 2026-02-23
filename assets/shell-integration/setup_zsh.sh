@@ -241,11 +241,9 @@ _kaku_select_line_end() {
 }
 _kaku_has_active_region() {
     emulate -L zsh
-    if (( REGION_ACTIVE )); then
-        return 0
-    fi
-    # Ctrl-Space often sets MARK without toggling REGION_ACTIVE in emacs mode.
-    if (( MARK != CURSOR )); then
+    # Require both an active region flag and a non-empty span. Either one can
+    # be stale on its own and would cause false-positive kill-region deletes.
+    if (( REGION_ACTIVE && MARK != CURSOR )); then
         return 0
     fi
     return 1
@@ -264,35 +262,84 @@ _kaku_deactivate_region() {
     fi
     return 0
 }
-_kaku_backspace_or_kill_region() {
+# Unconditional region deactivation helper (not bound to any key; called from
+# _kaku_mv_* widgets below). Unlike _kaku_deactivate_region this always clears
+# REGION_ACTIVE without checking MARK vs CURSOR, ensuring stale region flags
+# are removed even when the selection span is empty.
+_kaku_force_deactivate_region() {
     emulate -L zsh
-    if _kaku_has_active_region; then
-        zle kill-region
+    (( ! REGION_ACTIVE )) && return
+    if (( \${+widgets[deactivate-region]} )); then
+        zle deactivate-region
     else
-        zle backward-delete-char
+        REGION_ACTIVE=0
+        MARK=\$CURSOR
+        zle redisplay
     fi
 }
-_kaku_delete_or_kill_region() {
+# Movement widgets that auto-deactivate any active region before moving.
+# The Kaku GUI sends ^B/^F/^A/^E when collapsing a selection with a plain or
+# Cmd+arrow key; these wrappers ensure zsh clears REGION_ACTIVE in the same
+# keystroke, preventing spurious region-extension or stale region highlights.
+_kaku_mv_backward_char() {
     emulate -L zsh
-    if _kaku_has_active_region; then
-        zle kill-region
-    else
-        zle delete-char
-    fi
+    _kaku_force_deactivate_region
+    zle backward-char
 }
-_kaku_send_break_or_deactivate_region() {
+_kaku_mv_forward_char() {
     emulate -L zsh
-    if ! _kaku_deactivate_region; then
-        zle send-break
-    fi
+    _kaku_force_deactivate_region
+    zle forward-char
 }
+_kaku_mv_beginning_of_line() {
+    emulate -L zsh
+    _kaku_force_deactivate_region
+    zle beginning-of-line
+}
+_kaku_mv_end_of_line() {
+    emulate -L zsh
+    _kaku_force_deactivate_region
+    zle end-of-line
+}
+zle -N _kaku_mv_backward_char
+zle -N _kaku_mv_forward_char
+zle -N _kaku_mv_beginning_of_line
+zle -N _kaku_mv_end_of_line
 zle -N _kaku_select_left_char
 zle -N _kaku_select_right_char
 zle -N _kaku_select_line_start
 zle -N _kaku_select_line_end
-zle -N _kaku_backspace_or_kill_region
-zle -N _kaku_delete_or_kill_region
-zle -N _kaku_send_break_or_deactivate_region
+
+# Terminal-assisted selection shortcuts (Kaku GUI sends these directly).
+_kaku_cmd_a_select_all() {
+    emulate -L zsh
+    # Move to beginning first so MARK is anchored there, then extend to end.
+    # If set-mark-command were called first, MARK would be at the current cursor
+    # position and only the text after it would be selected.
+    zle beginning-of-line
+    zle set-mark-command
+    zle end-of-line
+}
+_kaku_cmd_shift_left() {
+    emulate -L zsh
+    zle set-mark-command
+    zle beginning-of-line
+}
+_kaku_cmd_shift_right() {
+    emulate -L zsh
+    zle set-mark-command
+    zle end-of-line
+}
+zle -N _kaku_cmd_a_select_all
+zle -N _kaku_cmd_shift_left
+zle -N _kaku_cmd_shift_right
+
+# Cancel selection without moving cursor (ESC key in Kaku GUI).
+_kaku_cancel_selection() {
+    emulate -L zsh
+    _kaku_force_deactivate_region
+}
+zle -N _kaku_cancel_selection
 
 # Shift+Left/Right: char expand; Shift+Home/End: to line boundary.
 bindkey '^[[1;2D' _kaku_select_left_char
@@ -300,11 +347,44 @@ bindkey '^[[1;2C' _kaku_select_right_char
 bindkey '^[[1;2H' _kaku_select_line_start
 bindkey '^[[1;2F' _kaku_select_line_end
 
-# Backspace/Delete: prefer deleting active region, otherwise normal behavior.
-bindkey '^?' _kaku_backspace_or_kill_region
-bindkey '^H' _kaku_backspace_or_kill_region
-bindkey '^[[3~' _kaku_delete_or_kill_region
-bindkey '^G' _kaku_send_break_or_deactivate_region
+# Terminal-assisted selection shortcuts (distinct CSI sequences from Kaku GUI).
+bindkey '^[[990~' _kaku_cmd_a_select_all
+bindkey '^[[991~' _kaku_cmd_shift_left
+bindkey '^[[992~' _kaku_cmd_shift_right
+bindkey '^[[995~' _kaku_cancel_selection
+
+# Emacs movement keys wrapped to auto-deactivate any active region.
+# ^B/^F/^A/^E are sent by the Kaku GUI when collapsing a selection with a
+# plain or Cmd+arrow key. Wrapping them (rather than using a custom CSI escape)
+# avoids stray characters if the sequence is received in an unexpected context.
+bindkey '^B' _kaku_mv_backward_char
+bindkey '^F' _kaku_mv_forward_char
+bindkey '^A' _kaku_mv_beginning_of_line
+bindkey '^E' _kaku_mv_end_of_line
+
+# Wrap delete widgets to auto-clear active region first, preventing accidental
+# multi-character deletes when the shell mark is stale from prior prompt selections.
+_kaku_backward_delete_char() {
+    emulate -L zsh
+    if _kaku_has_active_region; then
+        _kaku_deactivate_region 2>/dev/null || true
+    fi
+    zle backward-delete-char
+}
+_kaku_delete_char() {
+    emulate -L zsh
+    if _kaku_has_active_region; then
+        _kaku_deactivate_region 2>/dev/null || true
+    fi
+    zle delete-char
+}
+
+zle -N _kaku_backward_delete_char
+zle -N _kaku_delete_char
+bindkey '^?' _kaku_backward_delete_char
+bindkey '^H' _kaku_backward_delete_char
+bindkey '^[[3~' _kaku_delete_char
+bindkey '^G' send-break
 
 # Directory Navigation Options
 setopt auto_cd
@@ -560,6 +640,18 @@ ssh() {
         TERM=xterm-256color command ssh "\${extra_opts[@]}" "\$@"
     else
         command ssh "\${extra_opts[@]}" "\$@"
+    fi
+}
+
+# Auto-set TERM to xterm-256color for sudo commands when running under kaku.
+# sudo usually resets TERMINFO_DIRS, so root processes (e.g. nano) can fail
+# with "unknown terminal type 'kaku'" even though Kaku set TERMINFO_DIRS for the
+# user shell. Set KAKU_SUDO_SKIP_TERM_FIX=1 to disable this behavior.
+sudo() {
+    if [[ -z "\${KAKU_SUDO_SKIP_TERM_FIX-}" && "\$TERM" == "kaku" ]]; then
+        TERM=xterm-256color command sudo "\$@"
+    else
+        command sudo "\$@"
     fi
 }
 EOF

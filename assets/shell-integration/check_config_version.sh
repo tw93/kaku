@@ -66,10 +66,15 @@ echo ""
 echo -e "${BOLD}What's new:${NC}"
 case "$CURRENT_CONFIG_VERSION" in
 11)
+	echo "  • Cmd+A now selects the entire prompt line"
+	echo "  • Shift+Left/Right extends selection char by char"
+	echo "  • Cmd+Shift+Left/Right extends selection to line boundary"
+	echo "  • Plain/Cmd+arrow collapses selection without stale region highlight"
+	echo "  • ESC cancels active selection"
+	echo "  • Fixed: delete key no longer removes entire word after Chinese IME input"
+	echo "  • Fixed: sudo + nano no longer fails with unknown terminal type 'kaku'"
 	echo "  • AI error fixer: only suggests actions when commands fail"
 	echo "  • One-key apply for latest suggested fix command"
-	echo "  • Shell hooks now expose failed command + exit code to Kaku"
-	echo "  • Better bottom status feedback for troubleshooting flow"
 	;;
 *)
 	echo "  • Shell integration and reliability improvements"
@@ -123,6 +128,6 @@ echo ""
 echo "Press any key to continue..."
 read -n 1 -s
 
-# Start a new shell instead of exiting
+# Replace current process with the user's login shell
 TARGET_SHELL="$(detect_login_shell)"
 exec "$TARGET_SHELL" -l
