@@ -147,6 +147,8 @@ local lazygit_repo_probe_cache = {}
 local lazygit_repo_probe_interval_secs = 5
 local lazygit_command_probe = { value = nil, command = nil, checked_at = 0 }
 local lazygit_command_probe_interval_secs = 30
+local yazi_command_probe = { value = nil, command = nil, checked_at = 0 }
+local yazi_command_probe_interval_secs = 30
 
 local function trim_trailing_whitespace(value)
   if type(value) ~= "string" then
@@ -1119,6 +1121,38 @@ local function is_lazygit_installed()
   return resolve_lazygit_command() ~= nil
 end
 
+local function resolve_yazi_command()
+  local now = now_secs()
+  local cached_value = yazi_command_probe.value
+  if cached_value ~= nil then
+    local age = now - yazi_command_probe.checked_at
+    if cached_value or age < yazi_command_probe_interval_secs then
+      return yazi_command_probe.command
+    end
+  end
+
+  local candidates = {
+    "yazi",
+    "/opt/homebrew/bin/yazi",
+    "/usr/local/bin/yazi",
+  }
+  local resolved = nil
+  for _, cmd in ipairs(candidates) do
+    local call_ok, run_result = pcall(function()
+      return select(1, wezterm.run_child_process({ cmd, "--version" }))
+    end)
+    if call_ok and run_result then
+      resolved = cmd
+      break
+    end
+  end
+
+  yazi_command_probe.value = resolved ~= nil
+  yazi_command_probe.command = resolved
+  yazi_command_probe.checked_at = now
+  return resolved
+end
+
 local function pane_is_lazygit(pane)
   if not pane then
     return false
@@ -1164,6 +1198,10 @@ local function show_lazygit_toast(window, pane, event_name)
   pcall(function()
     window:perform_action(wezterm.action.EmitEvent(event_name), pane)
   end)
+end
+
+local function show_yazi_toast(window, pane, event_name)
+  show_lazygit_toast(window, pane, event_name)
 end
 
 local function maybe_show_lazygit_hint(window, pane)
@@ -1235,6 +1273,31 @@ local function launch_lazygit(window, pane)
     return
   end
   mark_repo_lazygit_used(repo_root)
+end
+
+local function launch_yazi(window, pane)
+  pane = resolve_active_pane(window, pane)
+  if not pane then
+    show_yazi_toast(window, pane, "kaku-toast-yazi-no-pane")
+    return
+  end
+
+  local yazi_cmd = resolve_yazi_command()
+  if not yazi_cmd then
+    show_yazi_toast(window, pane, "kaku-toast-yazi-missing")
+    return
+  end
+
+  local ok = pcall(function()
+    -- Prefer the shell wrapper `y` for cwd sync, and fall back to raw yazi.
+    window:perform_action(
+      wezterm.action.SendString("\x15y 2>/dev/null || " .. yazi_cmd .. "\r"),
+      pane
+    )
+  end)
+  if not ok then
+    show_yazi_toast(window, pane, "kaku-toast-yazi-dispatch-failed")
+  end
 end
 
 local function evict_stale_cache(live_pane_ids)
@@ -1363,6 +1426,10 @@ end)
 
 wezterm.on('kaku-launch-lazygit', function(window, pane)
   launch_lazygit(window, pane)
+end)
+
+wezterm.on('kaku-launch-yazi', function(window, pane)
+  launch_yazi(window, pane)
 end)
 
 wezterm.on('kaku-ai-apply-last-fix', function(window, pane)
@@ -1855,6 +1922,13 @@ config.keys = {
     key = 'G',
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('kaku-launch-lazygit'),
+  },
+
+  -- Cmd+Shift+Y: launch yazi in current pane
+  {
+    key = 'Y',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-launch-yazi'),
   },
 
   -- Cmd+Ctrl+F: toggle fullscreen

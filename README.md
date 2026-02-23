@@ -51,6 +51,7 @@ Kaku comes with intuitive macOS-native shortcuts:
 | Kaku AI Settings | `Cmd + Shift + A` |
 | Kaku Assistant Apply Suggestion | `Cmd + Shift + E` |
 | Open Lazygit | `Cmd + Shift + G` |
+| Yazi File Manager | `Cmd + Shift + Y` or `y` |
 | Font Size | `Cmd + +`, `Cmd + -`, `Cmd + 0` |
 | Smart Jump | `z <dir>` |
 | Smart Select | `z -l <dir>` |
@@ -72,6 +73,7 @@ Optional CLI tools installed via Homebrew during `kaku init`:
 - **Starship**: A fast, customizable prompt showing git status, package versions, and execution time.
 - **Delta**: A syntax-highlighting pager for git, diff, and grep output.
 - **Lazygit**: A terminal UI for fast, visual Git workflows without leaving the shell.
+- **Yazi**: A terminal file manager. Use `y` to launch it and sync the shell directory on exit.
 
 Kaku uses `~/.config/kaku/kaku.lua` for configuration, fully compatible with WezTerm's Lua API, with built-in defaults at `Kaku.app/Contents/Resources/kaku.lua` as fallback.
 

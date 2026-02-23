@@ -3162,6 +3162,12 @@ impl TermWindow {
                     self.show_toast("Lazygit not found. Run kaku init".to_string());
                 } else if name == "kaku-toast-lazygit-dispatch-failed" {
                     self.show_toast("Lazygit: Dispatch failed".to_string());
+                } else if name == "kaku-toast-yazi-no-pane" {
+                    self.show_toast("Yazi: No active pane".to_string());
+                } else if name == "kaku-toast-yazi-missing" {
+                    self.show_toast("Yazi not found. Run kaku init".to_string());
+                } else if name == "kaku-toast-yazi-dispatch-failed" {
+                    self.show_toast("Yazi: Dispatch failed".to_string());
                 } else if name == "kaku-toast-ai-analyzing" {
                     let message = "Kaku Assistant analyzing command error".to_string();
                     self.show_ai_progress_toast(message.clone(), ai_toast_lifetime_ms(&message));
