@@ -86,13 +86,9 @@ Kaku includes a built-in assistant for command-line error recovery and a unified
 - **Kaku Assistant**: Automatically analyzes failed commands and prepares a safe command suggestion.
 - **AI Tools Config**: Manage settings for tools like Claude Code, Codex, Gemini CLI, Copilot CLI, OpenCode, and OpenClaw.
 
-Open AI settings with:
+Open AI settings with `kaku ai`, then configure **Kaku Assistant** (enable, model, base URL, API key) and your external AI tools in one place.
 
-```bash
-kaku ai
-```
-
-Inside `kaku ai`, configure **Kaku Assistant** (enable, model, base URL, API key) and your external AI tools in one place.
+Tip: DeepSeek-V3.2 is a great low-cost option to start with for everyday AI coding tasks.
 
 When Kaku Assistant has a suggestion ready after a command error, press `Cmd + Shift + E` to apply it.
 

@@ -27,7 +27,7 @@ use window::WindowOps;
 
 // Kaku palette visual defaults. Used only when the user keeps the stock
 // command_palette_* colors, so custom config still takes precedence.
-const KAKU_BG: LinearRgba = LinearRgba::with_components(0.082, 0.078, 0.106, 0.95);
+const KAKU_BG: LinearRgba = LinearRgba::with_components(0.082, 0.078, 0.106, 0.985);
 const KAKU_FG: LinearRgba = LinearRgba::with_components(0.929, 0.925, 0.933, 1.0);
 const KAKU_ACCENT: LinearRgba = LinearRgba::with_components(0.635, 0.467, 1.0, 1.0);
 const KAKU_SELECTION_BG: LinearRgba = LinearRgba::with_components(0.161, 0.149, 0.235, 1.0);
