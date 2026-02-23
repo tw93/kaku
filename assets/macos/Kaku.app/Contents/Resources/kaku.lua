@@ -2122,8 +2122,6 @@ wezterm.on('gui-startup', function(cmd)
   local current_version = 11  -- Update this when config changes
 
   local state_file = home .. "/.config/kaku/state.json"
-  local legacy_version_file = home .. "/.config/kaku/.kaku_config_version"
-  local legacy_geometry_file = home .. "/.config/kaku/.kaku_window_geometry"
   local is_first_run = false
   local needs_update = false
 
@@ -2167,68 +2165,6 @@ wezterm.on('gui-startup', function(cmd)
       wf:close()
     end
   end
-
-  local function remove_legacy_files()
-    os.remove(legacy_version_file)
-    os.remove(legacy_geometry_file)
-  end
-
-  local function parse_legacy_geometry(raw)
-    if not raw or raw == "" then
-      return nil
-    end
-
-    local values = {}
-    for number in raw:gmatch("%d+") do
-      values[#values + 1] = tonumber(number)
-    end
-
-    if #values >= 4 then
-      return {
-        width = values[#values - 1],
-        height = values[#values],
-      }
-    elseif #values >= 2 then
-      return {
-        width = values[1],
-        height = values[2],
-      }
-    end
-
-    return nil
-  end
-
-  local function migrate_legacy_state_if_needed()
-    local existing_state = io.open(state_file, "r")
-    if existing_state then
-      existing_state:close()
-      return
-    end
-
-    local legacy_version = nil
-    local legacy_geometry = nil
-
-    local lv = io.open(legacy_version_file, "r")
-    if lv then
-      legacy_version = tonumber(lv:read("*all"))
-      lv:close()
-    end
-
-    local lg = io.open(legacy_geometry_file, "r")
-    if lg then
-      legacy_geometry = parse_legacy_geometry(lg:read("*all"))
-      lg:close()
-    end
-
-    local has_legacy_markers = legacy_version ~= nil or legacy_geometry ~= nil
-
-    if has_legacy_markers then
-      write_state(legacy_version or current_version, legacy_geometry)
-      remove_legacy_files()
-    end
-  end
-
-  migrate_legacy_state_if_needed()
 
   local user_version = nil
   local state_file_exists = false

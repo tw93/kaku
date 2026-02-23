@@ -103,26 +103,6 @@ mod imp {
             "removed Lazygit hint state",
             &mut report,
         )?;
-        remove_file_if_exists(
-            config_home().join(".first_run_completed"),
-            "removed legacy first-run marker",
-            &mut report,
-        )?;
-        remove_file_if_exists(
-            config_home().join(".kaku_config_version"),
-            "removed legacy config version marker",
-            &mut report,
-        )?;
-        remove_file_if_exists(
-            config_home().join(".kaku_window_geometry"),
-            "removed legacy window geometry marker",
-            &mut report,
-        )?;
-        remove_file_if_exists(
-            config_home().join(".kaku_window_position"),
-            "removed legacy window position marker",
-            &mut report,
-        )?;
         remove_dir_if_exists(
             config_home().join("backups"),
             "removed Kaku backup directory",
@@ -391,6 +371,10 @@ mod imp {
         (merged, true)
     }
 
+    /// Strips the old inline Kaku shell integration block that was written directly
+    /// into .zshrc in early Kaku versions (before the source-based kaku.zsh approach).
+    /// The block starts with `# Kaku Shell Integration`, contains `KAKU_ZSH_DIR`, and
+    /// ends with a `fi` that follows the zsh-syntax-highlighting line.
     fn strip_legacy_inline_block(content: &str) -> (String, bool) {
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {

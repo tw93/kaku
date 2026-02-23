@@ -3150,9 +3150,6 @@ impl TermWindow {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "run-kaku-ai-config" {
                     pane.writer().write_all(b"kaku ai\n")?;
-                } else if name == "kaku-run-lazygit" {
-                    // Backward compatibility for older event name.
-                    self.emit_window_event("kaku-launch-lazygit", None);
                 } else if name == "kaku-toast-try-lazygit" {
                     self.show_toast("Try Lazygit: Cmd+Shift+G".to_string());
                 } else if name == "kaku-toast-lazygit-no-pane" {
