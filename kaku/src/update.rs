@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 
 #[derive(Debug, Parser, Clone, Default)]
@@ -659,6 +659,21 @@ mod imp {
         }
     }
 
+    /// Validates that the path points to a valid Kaku.app bundle.
+    /// Uses Path component comparison (not string suffix) to handle
+    /// trailing separators correctly (e.g., /Applications/Kaku.app/).
+    fn validate_app_bundle_path(path: &Path) -> anyhow::Result<()> {
+        // Use ends_with("Kaku.app") which compares path components, not strings.
+        // This correctly handles paths like /Applications/Kaku.app/ (with trailing slash).
+        if !path.ends_with("Kaku.app") {
+            bail!(
+                "invalid app bundle path: must end with Kaku.app: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
     fn write_helper_script(script_path: &Path) -> anyhow::Result<()> {
         let script = r#"#!/bin/bash
 set -euo pipefail
@@ -667,9 +682,34 @@ TARGET_APP="$1"
 NEW_APP="$2"
 WORK_DIR="$3"
 LOG_FILE="$WORK_DIR/update.log"
+
+strip_trailing_slashes() {
+  local p="$1"
+  while [[ "$p" == */ ]]; do
+    p="${p%/}"
+  done
+  printf '%s\n' "$p"
+}
+TARGET_APP_NORM=$(strip_trailing_slashes "$TARGET_APP")
+NEW_APP_NORM=$(strip_trailing_slashes "$NEW_APP")
+# Use normalized paths consistently for all later path joins and file operations.
+TARGET_APP="$TARGET_APP_NORM"
+NEW_APP="$NEW_APP_NORM"
 BACKUP_APP="${TARGET_APP}.backup.$(date +%s)"
 TARGET_GUI="$TARGET_APP/Contents/MacOS/kaku-gui"
 TARGET_CLI="$TARGET_APP/Contents/MacOS/kaku"
+
+# Validate that paths end with Kaku.app for safety (allow trailing slashes).
+# Final component match mirrors Rust Path::ends_with("Kaku.app") semantics.
+# After stripping trailing slashes, the final component must be Kaku.app
+if [[ ! "$TARGET_APP_NORM" == */Kaku.app && ! "$TARGET_APP_NORM" == Kaku.app ]]; then
+    echo "Error: TARGET_APP must end with Kaku.app" >&2
+    exit 1
+fi
+if [[ ! "$NEW_APP_NORM" == */Kaku.app && ! "$NEW_APP_NORM" == Kaku.app ]]; then
+    echo "Error: NEW_APP must end with Kaku.app" >&2
+    exit 1
+fi
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG_FILE"
@@ -721,18 +761,37 @@ EOF
 log "start apply update"
 /usr/bin/osascript -e 'display notification "Kaku is applying an update and will relaunch automatically." with title "Kaku Update"' >/dev/null 2>&1 || true
 
+# pgrep/pkill -f treats the pattern as a regex, but TARGET_GUI/TARGET_CLI may contain
+# regex metacharacters. Match against the full command line via ps and shell pattern
+# literals instead. Use ps -axww so long command lines are not truncated.
+collect_kaku_pids() {
+  ps -axww -o pid= -o args= | while read -r pid args; do
+    [[ -z "$pid" ]] && continue
+    [[ "$pid" == "$$" ]] && continue
+    case "$args" in
+      *"$TARGET_GUI"* | *"$TARGET_CLI"* ) printf '%s\n' "$pid" ;;
+    esac
+  done | sort -u
+}
+
+KAKU_PIDS=""
 for _ in $(seq 1 20); do
-  if /usr/bin/pgrep -f "$TARGET_GUI" >/dev/null 2>&1 || /usr/bin/pgrep -f "$TARGET_CLI" >/dev/null 2>&1; then
-    /usr/bin/pkill -TERM -f "$TARGET_GUI" >/dev/null 2>&1 || true
-    /usr/bin/pkill -TERM -f "$TARGET_CLI" >/dev/null 2>&1 || true
-    sleep 1
-  else
+  KAKU_PIDS=$(collect_kaku_pids | tr '\n' ' ')
+  if [[ -z "$KAKU_PIDS" ]]; then
     break
   fi
+  for pid in $KAKU_PIDS; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 1
 done
-
-/usr/bin/pkill -KILL -f "$TARGET_GUI" >/dev/null 2>&1 || true
-/usr/bin/pkill -KILL -f "$TARGET_CLI" >/dev/null 2>&1 || true
+# Final force-kill if any remain
+KAKU_PIDS=$(collect_kaku_pids | tr '\n' ' ')
+if [[ -n "$KAKU_PIDS" ]]; then
+  for pid in $KAKU_PIDS; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+fi
 
 if [[ -d "$TARGET_APP" ]]; then
   log "backup existing app"
@@ -824,6 +883,10 @@ log "done"
         new_app: &Path,
         work_dir: &Path,
     ) -> anyhow::Result<()> {
+        // Validate app bundle paths before spawning the helper
+        validate_app_bundle_path(target_app).context("validate target app bundle path")?;
+        validate_app_bundle_path(new_app).context("validate new app bundle path")?;
+
         Command::new("/usr/bin/nohup")
             .arg("/bin/bash")
             .arg(script)
