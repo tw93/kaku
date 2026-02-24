@@ -86,6 +86,13 @@ const ALL_TOOLS: [Tool; 8] = [
     Tool::OpenClaw,
 ];
 
+const FACTORY_DROID_DEFAULT_MODEL: &str = "opus";
+const FACTORY_DROID_DEFAULT_REASONING: &str = "off";
+const FACTORY_DROID_DEFAULT_AUTONOMY: &str = "normal";
+const FACTORY_DROID_REASONING_OPTIONS: [&str; 5] = ["off", "none", "low", "medium", "high"];
+const FACTORY_DROID_AUTONOMY_OPTIONS: [&str; 5] =
+    ["normal", "spec", "auto-low", "auto-medium", "auto-high"];
+
 struct FieldEntry {
     key: String,
     value: String,
@@ -213,6 +220,25 @@ fn json_str(val: &serde_json::Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn json_nested_or_top_str(
+    val: &serde_json::Value,
+    parent_key: &str,
+    nested_key: &str,
+    legacy_top_key: &str,
+) -> String {
+    val.get(parent_key)
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get(nested_key))
+        .and_then(|v| v.as_str())
+        .or_else(|| val.get(legacy_top_key).and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn string_options(values: &[&str]) -> Vec<String> {
+    values.iter().map(|v| (*v).to_string()).collect()
 }
 
 fn mask_key(val: &str) -> String {
@@ -1106,20 +1132,13 @@ fn extract_factory_droid_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     let session_defaults = val
         .get("sessionDefaultSettings")
         .and_then(|v| v.as_object());
-
-    let model = session_defaults
-        .and_then(|s| s.get("model"))
-        .and_then(|v| v.as_str())
-        .or_else(|| val.get("model").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-
-    let reasoning = session_defaults
-        .and_then(|s| s.get("reasoningEffort"))
-        .and_then(|v| v.as_str())
-        .or_else(|| val.get("reasoningEffort").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
+    let model = json_nested_or_top_str(val, "sessionDefaultSettings", "model", "model");
+    let reasoning = json_nested_or_top_str(
+        val,
+        "sessionDefaultSettings",
+        "reasoningEffort",
+        "reasoningEffort",
+    );
     let autonomy = session_defaults
         .and_then(|s| s.get("autonomyMode").or_else(|| s.get("autonomyLevel")))
         .and_then(|v| v.as_str())
@@ -1135,7 +1154,7 @@ fn extract_factory_droid_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         FieldEntry {
             key: "Model".into(),
             value: if model.is_empty() {
-                "opus".into()
+                FACTORY_DROID_DEFAULT_MODEL.into()
             } else {
                 model
             },
@@ -1145,36 +1164,61 @@ fn extract_factory_droid_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         FieldEntry {
             key: "Reasoning Effort".into(),
             value: if reasoning.is_empty() {
-                "off".into()
+                FACTORY_DROID_DEFAULT_REASONING.into()
             } else {
                 reasoning
             },
-            options: vec![
-                "off".into(),
-                "none".into(),
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-            ],
+            options: string_options(&FACTORY_DROID_REASONING_OPTIONS),
             editable: true,
         },
         FieldEntry {
             key: "Autonomy Level".into(),
             value: if autonomy.is_empty() {
-                "normal".into()
+                FACTORY_DROID_DEFAULT_AUTONOMY.into()
             } else {
                 autonomy
             },
-            options: vec![
-                "normal".into(),
-                "spec".into(),
-                "auto-low".into(),
-                "auto-medium".into(),
-                "auto-high".into(),
-            ],
+            options: string_options(&FACTORY_DROID_AUTONOMY_OPTIONS),
             editable: true,
         },
     ]
+}
+
+fn factory_droid_session_key(field_key: &str) -> Option<&'static str> {
+    match field_key {
+        "Model" => Some("model"),
+        "Reasoning Effort" => Some("reasoningEffort"),
+        // Normalize writes to `autonomyMode` while still accepting legacy `autonomyLevel`.
+        "Autonomy Level" => Some("autonomyMode"),
+        _ => None,
+    }
+}
+
+fn save_factory_droid_field(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    field_key: &str,
+    new_val: &str,
+) -> anyhow::Result<()> {
+    let Some(target_key) = factory_droid_session_key(field_key) else {
+        return Ok(());
+    };
+
+    let session_defaults = obj
+        .entry("sessionDefaultSettings")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("sessionDefaultSettings is not an object")?;
+
+    if new_val == "—" || new_val.is_empty() {
+        session_defaults.remove(target_key);
+    } else {
+        session_defaults.insert(
+            target_key.to_string(),
+            serde_json::Value::String(new_val.to_string()),
+        );
+    }
+
+    Ok(())
 }
 
 fn extract_opencode_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
@@ -1951,31 +1995,7 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
         }
         Tool::FactoryDroid => {
             let obj = parsed.as_object_mut().context("root is not object")?;
-
-            let target_key = match field_key {
-                "Model" => Some("model"),
-                "Reasoning Effort" => Some("reasoningEffort"),
-                "Autonomy Level" => Some("autonomyMode"),
-                _ => None,
-            };
-            let Some(target_key) = target_key else {
-                return Ok(());
-            };
-
-            let session_defaults = obj
-                .entry("sessionDefaultSettings")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .context("sessionDefaultSettings is not an object")?;
-
-            if new_val == "—" || new_val.is_empty() {
-                session_defaults.remove(target_key);
-            } else {
-                session_defaults.insert(
-                    target_key.to_string(),
-                    serde_json::Value::String(new_val.to_string()),
-                );
-            }
+            save_factory_droid_field(obj, field_key, new_val)?;
         }
         Tool::ClaudeCode => {
             let env_key = match field_key {
@@ -2550,5 +2570,90 @@ mod tests {
         edit_delete(&mut buf, cursor);
         assert_eq!(buf, "你好");
         assert_eq!(cursor, "你".len());
+    }
+
+    #[test]
+    fn factory_droid_extract_prefers_session_defaults() {
+        let parsed = serde_json::json!({
+            "model": "legacy-model",
+            "reasoningEffort": "low",
+            "autonomyMode": "spec",
+            "sessionDefaultSettings": {
+                "model": "fd-model",
+                "reasoningEffort": "medium",
+                "autonomyLevel": "auto-low"
+            }
+        });
+
+        let fields = extract_factory_droid_fields(&parsed);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].key, "Model");
+        assert_eq!(fields[0].value, "fd-model");
+        assert!(fields[0].options.is_empty());
+
+        assert_eq!(fields[1].key, "Reasoning Effort");
+        assert_eq!(fields[1].value, "medium");
+        assert_eq!(
+            fields[1].options,
+            string_options(&FACTORY_DROID_REASONING_OPTIONS)
+        );
+
+        assert_eq!(fields[2].key, "Autonomy Level");
+        assert_eq!(fields[2].value, "auto-low");
+        assert_eq!(
+            fields[2].options,
+            string_options(&FACTORY_DROID_AUTONOMY_OPTIONS)
+        );
+    }
+
+    #[test]
+    fn factory_droid_extract_falls_back_to_top_level_and_defaults() {
+        let parsed = serde_json::json!({
+            "model": "legacy-model",
+            "reasoningEffort": "high",
+            "autonomyLevel": "spec"
+        });
+
+        let fields = extract_factory_droid_fields(&parsed);
+        assert_eq!(fields[0].value, "legacy-model");
+        assert_eq!(fields[1].value, "high");
+        assert_eq!(fields[2].value, "spec");
+
+        let empty_fields = extract_factory_droid_fields(&serde_json::json!({}));
+        assert_eq!(empty_fields[0].value, FACTORY_DROID_DEFAULT_MODEL);
+        assert_eq!(empty_fields[1].value, FACTORY_DROID_DEFAULT_REASONING);
+        assert_eq!(empty_fields[2].value, FACTORY_DROID_DEFAULT_AUTONOMY);
+    }
+
+    #[test]
+    fn factory_droid_save_writes_session_defaults_and_normalizes_autonomy_key() {
+        let mut obj = serde_json::json!({
+            "autonomyLevel": "spec"
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+
+        save_factory_droid_field(&mut obj, "Autonomy Level", "auto-high").expect("save autonomy");
+        save_factory_droid_field(&mut obj, "Model", "gpt-5.1-codex").expect("save model");
+        save_factory_droid_field(&mut obj, "Reasoning Effort", "").expect("clear reasoning effort");
+
+        let session_defaults = obj
+            .get("sessionDefaultSettings")
+            .and_then(|v| v.as_object())
+            .expect("sessionDefaultSettings object");
+
+        assert_eq!(
+            session_defaults
+                .get("autonomyMode")
+                .and_then(|v| v.as_str()),
+            Some("auto-high")
+        );
+        assert_eq!(session_defaults.get("autonomyLevel"), None);
+        assert_eq!(
+            session_defaults.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.1-codex")
+        );
+        assert_eq!(session_defaults.get("reasoningEffort"), None);
     }
 }
