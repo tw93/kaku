@@ -1007,6 +1007,10 @@ impl super::TermWindow {
             None => return,
         };
 
+        if window_key.key_is_down {
+            self.pane_state(pane.pane_id()).has_unread_bell = false;
+        }
+
         // The leader key is a kind of modal modifier key.
         // It is allowed to be active for up to the leader timeout duration,
         // after which it auto-deactivates.

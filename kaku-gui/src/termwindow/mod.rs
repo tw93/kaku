@@ -444,6 +444,7 @@ pub struct PaneState {
     pub overlay: Option<OverlayState>,
 
     bell_start: Option<Instant>,
+    pub has_unread_bell: bool,
     pub mouse_terminal_coords: Option<(ClickPosition, StableRowIndex)>,
 }
 
@@ -848,6 +849,9 @@ impl TermWindow {
 
         if let Some(pane) = self.get_active_pane_or_overlay() {
             pane.focus_changed(focused);
+            if focused {
+                self.pane_state(pane.pane_id()).has_unread_bell = false;
+            }
         }
 
         self.update_title();
@@ -1587,8 +1591,21 @@ impl TermWindow {
                     log::trace!("Ding! (this is the bell) in pane {}", pane_id);
                     self.emit_window_event("bell", Some(pane_id));
 
+                    // Check active pane FIRST, before borrowing pane_state.
+                    // get_active_pane_or_overlay() also borrows pane_state internally,
+                    // so holding a RefMut from pane_state() simultaneously would cause
+                    // a RefCell double-borrow panic at runtime.
+                    let is_inactive = self
+                        .get_active_pane_or_overlay()
+                        .map_or(true, |p| p.pane_id() != pane_id);
+
                     let mut per_pane = self.pane_state(pane_id);
                     per_pane.bell_start.replace(Instant::now());
+                    if is_inactive {
+                        per_pane.has_unread_bell = true;
+                    }
+                    drop(per_pane);
+
                     window.invalidate();
                 }
                 MuxNotification::Alert {
