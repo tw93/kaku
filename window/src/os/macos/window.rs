@@ -2932,6 +2932,12 @@ impl WindowView {
         let backing_frame: NSRect = unsafe { msg_send![this, convertRectToBacking: frame] };
         let scale = frame.size.width / backing_frame.size.width;
 
+        if !actual.0.is_null() {
+            unsafe {
+                *actual.0 = range;
+            }
+        }
+
         if let Some(this) = Self::get_this(this) {
             let cursor_pos = this
                 .inner
