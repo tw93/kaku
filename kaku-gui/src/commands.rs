@@ -233,7 +233,6 @@ impl CommandDef {
             ResetFontAndWindowSize,
             ScrollToTop,
             ScrollToBottom,
-            ActivateCommandPalette,
             // Window menu
             ToggleFullScreen,
             Hide,
@@ -391,7 +390,10 @@ impl CommandDef {
         }
 
         fn is_rare_action(action: &KeyAssignment) -> bool {
-            matches!(action, ShowDebugOverlay | OpenUri(_))
+            matches!(
+                action,
+                ShowDebugOverlay | OpenUri(_) | ScrollToTop | ScrollToBottom | ToggleAlwaysOnBottom
+            )
         }
 
         fn browse_bucket(cmd: &ExpandedCommand) -> u8 {
@@ -399,16 +401,28 @@ impl CommandDef {
             if is_rare_action(&cmd.action) {
                 return 4;
             }
-            if is_high_value_discovery_action(&cmd.action) && !is_familiar_action(&cmd.action) {
+            if is_familiar_action(&cmd.action) {
                 return 0;
             }
-            if !has_key && !is_familiar_action(&cmd.action) {
+            if is_high_value_discovery_action(&cmd.action) {
                 return 1;
             }
-            if is_familiar_action(&cmd.action) {
-                return 3;
+            if has_key {
+                return 2;
             }
-            2
+            3
+        }
+
+        /// Sub-order by menu category so semantically related commands cluster.
+        fn semantic_group(cmd: &ExpandedCommand) -> u8 {
+            match cmd.menubar.first().copied() {
+                Some("Shell") => 0,
+                Some("Edit") => 1,
+                Some("View") => 2,
+                Some("Window") => 3,
+                Some("Help") => 4,
+                _ => 5,
+            }
         }
 
         fn action_dedupe_identity(action: &KeyAssignment) -> String {
@@ -443,10 +457,11 @@ impl CommandDef {
             }
         }
 
-        // Default browsing order: high-value discovery first, familiar/rare later.
+        // Default browsing order: familiar first, then discovery, then others, rare last.
         deduped.sort_by(|a, b| {
             browse_bucket(a)
                 .cmp(&browse_bucket(b))
+                .then_with(|| semantic_group(a).cmp(&semantic_group(b)))
                 .then_with(|| a.brief.cmp(&b.brief))
         });
 
