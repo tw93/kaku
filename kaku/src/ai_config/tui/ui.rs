@@ -22,14 +22,15 @@ pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // logo header
-        Constraint::Min(4),    // tool list
+        Constraint::Fill(1),   // tool list
+        Constraint::Length(1), // empty spacer
         Constraint::Length(1), // status bar
     ])
     .split(area);
 
     render_header(frame, chunks[0]);
     render_tools(frame, chunks[1], app);
-    render_status_bar(frame, chunks[2], app);
+    render_status_bar(frame, chunks[3], app);
 
     if app.is_selecting() {
         render_selector(frame, area, app);

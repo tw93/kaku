@@ -186,7 +186,7 @@ impl ToolState {
                 log::warn!("failed to read config for {}: {}", tool.label(), e);
                 return ToolState {
                     tool,
-                    installed: true,
+                    installed: false,
                     fields: vec![FieldEntry {
                         key: "error".into(),
                         value: format!("failed to read config: {}", e),
@@ -1754,7 +1754,11 @@ fn status_value_for_display(field_key: &str, new_val: &str) -> String {
 
 impl App {
     fn new() -> Self {
-        let tools: Vec<ToolState> = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
+        let tools: Vec<ToolState> = ALL_TOOLS
+            .iter()
+            .map(|t| ToolState::load(*t))
+            .filter(|t| t.tool == Tool::KakuAssistant || t.installed)
+            .collect();
         let first = tools.iter().position(|t| !t.fields.is_empty()).unwrap_or(0);
         let mut app = App {
             tools,
@@ -2093,7 +2097,11 @@ impl App {
 
         match fetch_models_dev_json() {
             Some(_) => {
-                self.tools = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
+                self.tools = ALL_TOOLS
+                    .iter()
+                    .map(|t| ToolState::load(*t))
+                    .filter(|t| t.tool == Tool::KakuAssistant || t.installed)
+                    .collect();
                 self.status_msg = Some("Models refreshed".into());
                 self.sync_transient_errors();
             }
