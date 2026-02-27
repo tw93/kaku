@@ -2763,7 +2763,32 @@ impl WindowView {
 
         if let Some(myself) = Self::get_this(this) {
             let mut inner = myself.inner.borrow_mut();
-            inner.ime_state = ImeDisposition::Continue;
+
+            if selector == "insertNewline:" {
+                let event = KeyEvent {
+                    key: KeyCode::Char('\r'),
+                    modifiers: Modifiers::NONE,
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: 1,
+                    key_is_down: true,
+                    raw: None,
+                };
+                inner.events.dispatch(WindowEvent::KeyEvent(event.clone()));
+
+                let up_event = KeyEvent {
+                    key: KeyCode::Char('\r'),
+                    modifiers: Modifiers::NONE,
+                    leds: KeyboardLedStatus::empty(),
+                    repeat_count: 1,
+                    key_is_down: false,
+                    raw: None,
+                };
+                inner.events.dispatch(WindowEvent::KeyEvent(up_event));
+
+                inner.ime_state = ImeDisposition::Acted;
+            } else {
+                inner.ime_state = ImeDisposition::Continue;
+            }
             inner.ime_last_event.take();
         }
     }
