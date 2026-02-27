@@ -2531,6 +2531,8 @@ pub fn run() -> anyhow::Result<()> {
     let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
     disable_raw_mode().context("disable raw mode")?;
     terminal.show_cursor().context("show cursor")?;
+    // Emit a trailing newline so zsh does not show a partial-line `%` indicator.
+    println!();
 
     result
 }
