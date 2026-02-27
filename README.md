@@ -61,10 +61,12 @@ Kaku comes with intuitive macOS-native shortcuts:
 
 ### Intuitive Interactions
 
-- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks complete (terminal bell).
-- **Zoom Window**: Double-click the title bar or tab bar empty space to zoom/unzoom the Kaku window.
-- **Open Folder**: Drag any folder to the Kaku Dock icon to instantly open it in a new window.
-- **Terminal History Peek**: Scroll up while inside alternate screen apps (like `less` or `vim`) to peek at your primary shell history.
+- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks finish.
+- **Global Hotkey**: Press `Cmd + Opt + Ctrl + K` anytime to float Kaku over your current workspace.
+- **Copy on Select**: Highlighting any text automatically copies it to your clipboard with a confirmation toast.
+- **Zoom Window**: Double-click the title bar or tab bar empty space to safely zoom or unzoom the window.
+- **Finder Integration**: Right-click folders in macOS Finder and deploy Kaku via Services, or drop multiple files directly onto the Kaku Dock icon.
+- **History Peek**: Scroll up while inside full-screen apps like `less` or `vim` to lift the screen and peek at your primary shell history without exiting.
 
 ## Configuration
 
