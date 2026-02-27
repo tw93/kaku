@@ -536,6 +536,7 @@ impl GuiFrontEnd {
         // Build the initial menubar synchronously so AppKit has selectors
         // registered before users hit menu actions or key equivalents.
         crate::commands::CommandDef::recreate_menubar(&config::configuration());
+        front_end.connection.sync_global_hotkey();
 
         Ok(front_end)
     }
@@ -993,6 +994,9 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
             // refresh asynchronously to avoid re-locking config here.
             promise::spawn::spawn_into_main_thread(async {
                 refresh_fast_config_snapshot();
+                if let Some(conn) = Connection::get() {
+                    conn.sync_global_hotkey();
+                }
             })
             .detach();
             // TODO(macos): AppKit does not allow safe async menubar reconstruction
