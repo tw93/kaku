@@ -1918,11 +1918,9 @@ fn default_harfbuzz_features() -> Vec<String> {
 }
 
 fn default_term() -> String {
-    if bundled_terminfo_dir().is_some() {
-        "kaku".into()
-    } else {
-        "xterm-256color".into()
-    }
+    // WezTerm sets `wezterm` here, but `kaku` causes SSH issues since its
+    // terminfo doesn't exist on remote servers. So we default to `xterm-256color`.
+    "xterm-256color".into()
 }
 
 fn bundled_terminfo_dir() -> Option<PathBuf> {
