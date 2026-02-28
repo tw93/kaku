@@ -2770,6 +2770,8 @@ impl WindowView {
             let mut inner = myself.inner.borrow_mut();
 
             if selector == "insertNewline:" {
+                // Handle newline from IME/dictation by dispatching Enter key event.
+                // Use ImeDisposition::Acted to prevent duplicate dispatch in key_down_event.
                 let event = KeyEvent {
                     key: KeyCode::Char('\r'),
                     modifiers: Modifiers::NONE,
@@ -2778,22 +2780,13 @@ impl WindowView {
                     key_is_down: true,
                     raw: None,
                 };
-                inner.events.dispatch(WindowEvent::KeyEvent(event.clone()));
-
-                let up_event = KeyEvent {
-                    key: KeyCode::Char('\r'),
-                    modifiers: Modifiers::NONE,
-                    leds: KeyboardLedStatus::empty(),
-                    repeat_count: 1,
-                    key_is_down: false,
-                    raw: None,
-                };
-                inner.events.dispatch(WindowEvent::KeyEvent(up_event));
-
+                inner.ime_last_event = Some(event.clone());
+                inner.events.dispatch(WindowEvent::KeyEvent(event));
                 inner.ime_state = ImeDisposition::Acted;
-            } else {
-                inner.ime_state = ImeDisposition::Continue;
+                return;
             }
+
+            inner.ime_state = ImeDisposition::Continue;
             inner.ime_last_event.take();
         }
     }
