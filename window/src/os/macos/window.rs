@@ -65,6 +65,11 @@ const FULLSCREEN_ENTER_HIDE_CONTENT_MS: u64 = 30;
 const FULLSCREEN_EXIT_HIDE_CONTENT_MS: u64 = 20;
 const ZOOM_HIDE_CONTENT_MS: u64 = 20;
 const MOVE_PERSIST_DELAY_SECS: f64 = 0.35;
+// Keep these accessibility strings stable. Some voice input tools match
+// TextArea semantics and descriptions heuristically to decide whether the
+// view is editable text.
+const AX_ROLE_TEXT_AREA: &[u8] = b"AXTextArea\0";
+const AX_ROLE_DESCRIPTION_TERMINAL_TEXT_AREA: &[u8] = b"terminal text area\0";
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -3135,6 +3140,26 @@ impl WindowView {
         NO
     }
 
+    // Accessibility support: report as text area so voice input tools can detect us
+    extern "C" fn accessibility_role(_this: &Object, _sel: Sel) -> id {
+        // NSAccessibilityTextAreaRole
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: AX_ROLE_TEXT_AREA.as_ptr()] }
+    }
+
+    extern "C" fn is_accessibility_element(_this: &Object, _sel: Sel) -> BOOL {
+        YES
+    }
+
+    extern "C" fn accessibility_role_description(_this: &Object, _sel: Sel) -> id {
+        // Intentionally not localized. Voice input tools may key off this phrase.
+        unsafe {
+            msg_send![
+                class!(NSString),
+                stringWithUTF8String: AX_ROLE_DESCRIPTION_TERMINAL_TEXT_AREA.as_ptr()
+            ]
+        }
+    }
+
     extern "C" fn kaku_perform_key_assignment(
         this: &mut Object,
         _sel: Sel,
@@ -4693,6 +4718,20 @@ impl WindowView {
             cls.add_method(
                 sel!(performDragOperation:),
                 Self::perform_drag_operation as extern "C" fn(&mut Object, Sel, id) -> BOOL,
+            );
+
+            // Accessibility support for voice input tools like Typeless
+            cls.add_method(
+                sel!(accessibilityRole),
+                Self::accessibility_role as extern "C" fn(&Object, Sel) -> id,
+            );
+            cls.add_method(
+                sel!(isAccessibilityElement),
+                Self::is_accessibility_element as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            cls.add_method(
+                sel!(accessibilityRoleDescription),
+                Self::accessibility_role_description as extern "C" fn(&Object, Sel) -> id,
             );
         }
 
