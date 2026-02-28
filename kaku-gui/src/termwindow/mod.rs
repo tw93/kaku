@@ -3286,7 +3286,7 @@ impl TermWindow {
                 } else if let Some(msg) = lookup_kaku_toast(name) {
                     self.show_toast(msg.to_string());
                 } else if name == "kaku-toast-ai-analyzing" {
-                    let message = "Kaku Assistant analyzing command error";
+                    let message = "Kaku Assistant analyzing command...";
                     self.show_ai_progress_toast(message.to_string(), ai_toast_lifetime_ms(message));
                 } else if name == "kaku-toast-ai-applied" {
                     // No notification on successful apply; command output is enough.
