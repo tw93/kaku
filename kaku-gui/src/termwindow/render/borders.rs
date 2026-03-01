@@ -206,11 +206,24 @@ impl crate::TermWindow {
     }
 
     pub fn get_os_border(&self) -> window::parameters::Border {
-        Self::get_os_border_impl(
+        let mut border = Self::get_os_border_impl(
             &self.os_parameters,
             &self.config,
             &self.dimensions,
             &self.render_metrics,
-        )
+        );
+
+        let is_fullscreen = self
+            .window_state
+            .contains(::window::WindowState::FULL_SCREEN);
+        let tab_bar_at_top = self.show_tab_bar && !self.config.tab_bar_at_bottom;
+
+        // Add extra top padding only when tab bar is at top in non-fullscreen mode.
+        // Tab bar at bottom relies solely on window_padding.top for spacing.
+        if tab_bar_at_top && !is_fullscreen {
+            border.top += ULength::new(6);
+        }
+
+        border
     }
 }

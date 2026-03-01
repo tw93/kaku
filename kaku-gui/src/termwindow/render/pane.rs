@@ -150,7 +150,11 @@ impl crate::TermWindow {
             // Calculate the height - respect bottom padding
             let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
                 // Bottom-most pane: extend to split center but respect window padding
-                let padding_bottom =
+                // When tab bar is at bottom, use minimal padding between content and tab bar
+                let padding_bottom = if bottom_bar_height > 0.0 {
+                    // Tab bar at bottom provides visual separation, use minimal gap
+                    crate::termwindow::render::paint::BOTTOM_TAB_BAR_PADDING
+                } else {
                     self.config
                         .window_padding
                         .bottom
@@ -158,7 +162,8 @@ impl crate::TermWindow {
                             dpi: self.dimensions.dpi as f32,
                             pixel_max: self.terminal_size.pixel_height as f32,
                             pixel_cell: cell_height,
-                        });
+                        })
+                };
                 self.dimensions.pixel_height as f32
                     - y
                     - padding_bottom
@@ -676,7 +681,11 @@ impl crate::TermWindow {
         // Calculate the height - respect bottom padding
         let height = if pos.top + pos.height >= self.terminal_size.rows as usize {
             // Bottom-most pane: extend to split center but respect window padding
-            let padding_bottom =
+            // When tab bar is at bottom, use minimal padding between content and tab bar
+            let padding_bottom = if bottom_bar_height > 0.0 {
+                // Tab bar at bottom provides visual separation, use minimal gap
+                crate::termwindow::render::paint::BOTTOM_TAB_BAR_PADDING
+            } else {
                 self.config
                     .window_padding
                     .bottom
@@ -684,7 +693,8 @@ impl crate::TermWindow {
                         dpi: self.dimensions.dpi as f32,
                         pixel_max: self.terminal_size.pixel_height as f32,
                         pixel_cell: cell_height,
-                    });
+                    })
+            };
             self.dimensions.pixel_height as f32
                 - y
                 - padding_bottom

@@ -23,6 +23,10 @@ pub enum AllowImage {
     No,
 }
 
+const STATUS_DOT_SIZE: f32 = 12.0;
+/// Minimal gap between terminal content and the bottom tab bar.
+pub(super) const BOTTOM_TAB_BAR_PADDING: f32 = 4.0;
+
 impl crate::TermWindow {
     pub fn paint_impl(&mut self, frame: &mut RenderFrame) -> anyhow::Result<()> {
         self.num_frames += 1;
@@ -241,7 +245,10 @@ impl crate::TermWindow {
                 } else {
                     0.0
                 };
-                let padding_bottom =
+                // When tab bar is at bottom, use minimal padding between content and tab bar
+                let padding_bottom = if self.config.tab_bar_at_bottom && tab_bar_height > 0.0 {
+                    BOTTOM_TAB_BAR_PADDING
+                } else {
                     self.config
                         .window_padding
                         .bottom
@@ -249,7 +256,8 @@ impl crate::TermWindow {
                             dpi: self.dimensions.dpi as f32,
                             pixel_max: self.terminal_size.pixel_height as f32,
                             pixel_cell: self.render_metrics.cell_size.height as f32,
-                        });
+                        })
+                };
                 let top_fill_height = border.top.get() as f32
                     + if self.config.tab_bar_at_bottom {
                         0.0
@@ -265,6 +273,16 @@ impl crate::TermWindow {
                     };
                 let right_fill_width =
                     self.effective_right_padding(&self.config) as f32 + border.right.get() as f32;
+                let left_fill_width =
+                    self.config
+                        .window_padding
+                        .left
+                        .evaluate_as_pixels(DimensionContext {
+                            dpi: self.dimensions.dpi as f32,
+                            pixel_max: self.terminal_size.pixel_width as f32,
+                            pixel_cell: self.render_metrics.cell_size.width as f32,
+                        })
+                        + border.left.get() as f32;
                 let window_width = self.dimensions.pixel_width as f32;
                 let window_height = self.dimensions.pixel_height as f32;
 
@@ -312,6 +330,21 @@ impl crate::TermWindow {
                         strip_background,
                     )
                     .context("filled_rectangle for transparent right strip")?;
+                }
+
+                if left_fill_width > 0.0 {
+                    let clamped_width = left_fill_width.min(window_width);
+                    let left_fill_y = top_fill_height.min(window_height);
+                    let left_fill_height =
+                        (window_height - left_fill_y - bottom_fill_height.min(window_height))
+                            .max(0.0);
+                    self.filled_rectangle(
+                        &mut layers,
+                        0,
+                        euclid::rect(0.0, left_fill_y, clamped_width, left_fill_height),
+                        strip_background,
+                    )
+                    .context("filled_rectangle for transparent left strip")?;
                 }
             }
             _ => {
@@ -419,7 +452,6 @@ impl crate::TermWindow {
             style: PolyStyle::Fill,
         }];
 
-        const DOT_SIZE: f32 = 10.0;
         const RIGHT_INSET: f32 = 3.0;
         const TOP_PANE_MARGIN_WITH_TAB_BAR: f32 = 24.0;
         const TOP_PANE_MARGIN_NO_TAB_BAR: f32 = 14.0;
@@ -444,10 +476,10 @@ impl crate::TermWindow {
             self.poly_quad(
                 &mut layers,
                 2,
-                euclid::point2(dot_x - DOT_SIZE - RIGHT_INSET, dot_y + margin_top),
+                euclid::point2(dot_x - STATUS_DOT_SIZE - RIGHT_INSET, dot_y + margin_top),
                 CIRCLE_POLY,
                 1,
-                euclid::size2(DOT_SIZE, DOT_SIZE),
+                euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
                 dot_color,
             )
             .context("active pane indicator")?;
@@ -476,7 +508,7 @@ impl crate::TermWindow {
         Ok(())
     }
 
-    /// Draw a blinking dot on inactive tabs that have panes with unread bell events.
+    /// Draw a dot on inactive tabs that have panes with unread bell events.
     fn paint_tab_bell_indicators(
         &mut self,
         layers: &mut crate::quad::TripleLayerQuadAllocator,
@@ -490,6 +522,16 @@ impl crate::TermWindow {
             None => return Ok(()),
         };
         let active_tab_idx = mux_window.get_active_idx();
+
+        // Entering a tab is considered reading its notifications.
+        // Clear unread bell flags for all panes in the active tab so that
+        // switching to that tab stops future notification dots immediately.
+        if let Some(active_tab) = mux_window.get_by_idx(active_tab_idx) {
+            let active_tab_panes = active_tab.iter_panes_ignoring_zoom();
+            for pos in &active_tab_panes {
+                self.pane_state(pos.pane.pane_id()).has_unread_bell = false;
+            }
+        }
 
         let mut tabs_with_bell: HashSet<usize> = HashSet::new();
         for (idx, tab) in mux_window.iter().enumerate() {
@@ -509,59 +551,42 @@ impl crate::TermWindow {
             return Ok(());
         }
 
-        // Blink: 500ms on, 500ms off
-        let blink_phase = self.created.elapsed().as_millis() % 1000;
-        let is_visible = blink_phase >= 500;
+        let notif_color = self.palette().cursor_bg.to_linear().mul_alpha(0.9);
 
-        if is_visible {
-            let notif_color = self.palette().cursor_bg.to_linear().mul_alpha(0.9);
+        static CIRCLE_POLY: &[Poly] = &[Poly {
+            path: &[PolyCommand::Circle {
+                center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+                radius: BlockCoord::Frac(1, 2),
+            }],
+            intensity: BlockAlpha::Full,
+            style: PolyStyle::Fill,
+        }];
 
-            static CIRCLE_POLY: &[Poly] = &[Poly {
-                path: &[PolyCommand::Circle {
-                    center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-                    radius: BlockCoord::Frac(1, 2),
-                }],
-                intensity: BlockAlpha::Full,
-                style: PolyStyle::Fill,
-            }];
+        const DOT_RIGHT_MARGIN: f32 = 6.0;
 
-            const DOT_SIZE: f32 = 10.0;
-            const DOT_RIGHT_MARGIN: f32 = 6.0;
+        for ui_item in &self.ui_items {
+            if let crate::termwindow::UIItemType::TabBar(TabBarItem::Tab {
+                tab_idx,
+                active: false,
+            }) = &ui_item.item_type
+            {
+                if tabs_with_bell.contains(tab_idx) {
+                    // Draw dot at the right side of the tab, vertically centered
+                    let dot_x =
+                        (ui_item.x + ui_item.width) as f32 - STATUS_DOT_SIZE - DOT_RIGHT_MARGIN;
+                    let dot_y = ui_item.y as f32 + (ui_item.height as f32 - STATUS_DOT_SIZE) / 2.0;
 
-            for ui_item in &self.ui_items {
-                if let crate::termwindow::UIItemType::TabBar(TabBarItem::Tab {
-                    tab_idx,
-                    active: false,
-                }) = &ui_item.item_type
-                {
-                    if tabs_with_bell.contains(tab_idx) {
-                        // Draw dot at the right side of the tab, vertically centered
-                        let dot_x =
-                            (ui_item.x + ui_item.width) as f32 - DOT_SIZE - DOT_RIGHT_MARGIN;
-                        let dot_y = ui_item.y as f32 + (ui_item.height as f32 - DOT_SIZE) / 2.0;
-
-                        self.poly_quad(
-                            layers,
-                            2,
-                            euclid::point2(dot_x, dot_y),
-                            CIRCLE_POLY,
-                            1,
-                            euclid::size2(DOT_SIZE, DOT_SIZE),
-                            notif_color,
-                        )
-                        .context("tab bell indicator")?;
-                    }
+                    self.poly_quad(
+                        layers,
+                        2,
+                        euclid::point2(dot_x, dot_y),
+                        CIRCLE_POLY,
+                        1,
+                        euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
+                        notif_color,
+                    )
+                    .context("tab bell indicator")?;
                 }
-            }
-        }
-
-        // Schedule re-render at next blink toggle (500ms cadence)
-        let next = Instant::now() + Duration::from_millis(500);
-        let mut anim = self.has_animation.borrow_mut();
-        match *anim {
-            Some(existing) if existing <= next => {}
-            _ => {
-                *anim = Some(next);
             }
         }
 

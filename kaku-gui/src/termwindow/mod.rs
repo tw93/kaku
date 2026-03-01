@@ -29,7 +29,7 @@ use crate::termwindow::render::{
 };
 use crate::termwindow::webgpu::WebGpuState;
 use ::wezterm_term::input::{ClickPosition, MouseButton as TMB};
-use ::window::*;
+use ::window::{ULength, *};
 use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
@@ -974,7 +974,14 @@ impl TermWindow {
             dpi,
         };
 
-        let border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+        let mut border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+
+        // Mirror get_os_border(): add 6px when tab bar is at top so the
+        // initial window height accounts for the same chrome space used at runtime.
+        let tab_bar_at_top = show_tab_bar && !config.tab_bar_at_bottom;
+        if tab_bar_at_top {
+            border.top += ULength::new(6);
+        }
 
         dimensions.pixel_height += (border.top + border.bottom).get() as usize;
         dimensions.pixel_width += (border.left + border.right).get() as usize;
@@ -2230,6 +2237,9 @@ impl TermWindow {
             self.load_os_parameters();
             self.apply_scale_change(&dimensions, self.fonts.get_font_scale());
             self.apply_dimensions(&dimensions, None, &window);
+            // Rebuild tab bar state synchronously so tab bar colors match the
+            // new palette in the same invalidate cycle as pane colors.
+            self.update_title_impl();
             window.config_did_change(&config);
             window.invalidate();
         }
