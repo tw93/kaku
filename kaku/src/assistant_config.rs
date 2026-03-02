@@ -83,11 +83,14 @@ pub fn ensure_assistant_toml_exists() -> anyhow::Result<PathBuf> {
 pub fn default_assistant_toml_template() -> String {
     format!(
         "# Kaku Assistant configuration\n\
+#\n\
 # enabled: true enables command analysis suggestions; false disables requests.\n\
 # api_key: provider API key, example: \"sk-xxxx\".\n\
 # model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n\
 # base_url: chat-completions API root URL.\n\
-# custom_headers: optional extra HTTP headers as \"Name: Value\" strings.\n\
+# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n\
+#                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n\
+#                 note: Authorization and Content-Type are reserved and cannot be overridden.\n\
 \n\
 enabled = true\n\
 # api_key = \"<your_api_key>\"\n\

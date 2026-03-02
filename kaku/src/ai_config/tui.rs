@@ -412,16 +412,6 @@ fn parse_custom_headers_toml(value: Option<&toml::Value>) -> Vec<String> {
     }
 }
 
-fn parse_custom_headers_input(raw: &str) -> Vec<String> {
-    normalize_custom_headers(
-        raw.replace('\n', ",")
-            .split(',')
-            .map(|part| part.trim().to_string())
-            .filter(|part| !part.is_empty())
-            .collect(),
-    )
-}
-
 /// Configuration for the Kaku built-in AI assistant.
 ///
 /// This struct holds the configuration for Kaku's AI-powered command analysis
@@ -584,16 +574,6 @@ fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
             editable: true,
         },
         FieldEntry {
-            key: "Custom Headers".into(),
-            value: if cfg.custom_headers().is_empty() {
-                "—".into()
-            } else {
-                cfg.custom_headers().join(", ")
-            },
-            options: vec![],
-            editable: true,
-        },
-        FieldEntry {
             key: "API Key".into(),
             value: mask_key(cfg.api_key()),
             options: vec![],
@@ -615,7 +595,9 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
     out.push_str("# api_key: provider API key, example: \"sk-xxxx\".\n");
     out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n");
     out.push_str("# base_url: chat-completions API root URL.\n");
-    out.push_str("# custom_headers: optional extra HTTP headers as \"Name: Value\" strings.\n\n");
+    out.push_str("# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n");
+    out.push_str("#                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n");
+    out.push_str("#                 note: Authorization and Content-Type are reserved and cannot be overridden.\n\n");
     out.push_str(if cfg.is_enabled() {
         "enabled = true\n"
     } else {
@@ -707,15 +689,6 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), base_url)
                 .with_custom_headers(cfg.custom_headers().to_vec())
-        }
-        "Custom Headers" => {
-            let custom_headers = if new_val.trim().is_empty() || new_val == "—" {
-                vec![]
-            } else {
-                parse_custom_headers_input(new_val)
-            };
-            KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), cfg.base_url())
-                .with_custom_headers(custom_headers)
         }
         "API Key" => KakuAssistantConfig::new(
             cfg.is_enabled(),
@@ -3047,15 +3020,4 @@ mod tests {
         assert_eq!(enabled.value, "Off");
     }
 
-    #[test]
-    fn kaku_assistant_custom_headers_are_visible_in_fields() {
-        let fields = extract_kaku_assistant_fields(
-            "custom_headers = [\"X-Customer-ID: demo\", \"X-Trace-ID: abc123\"]\n",
-        );
-        let headers = fields
-            .iter()
-            .find(|f| f.key == "Custom Headers")
-            .expect("custom headers field");
-        assert_eq!(headers.value, "X-Customer-ID: demo, X-Trace-ID: abc123");
-    }
 }
