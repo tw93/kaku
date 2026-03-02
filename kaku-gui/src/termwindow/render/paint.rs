@@ -6,8 +6,8 @@ use crate::termwindow::render::corners::{
 };
 use crate::termwindow::{DimensionContext, RenderFrame, TermWindowNotif};
 use crate::utilsprites::RenderMetrics;
-use ::window::WindowOps;
 use ::window::bitmaps::atlas::OutOfTextureSpace;
+use ::window::WindowOps;
 use anyhow::Context;
 use config::Dimension;
 use smol::Timer;
