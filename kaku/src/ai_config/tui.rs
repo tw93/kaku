@@ -595,7 +595,9 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
     out.push_str("# api_key: provider API key, example: \"sk-xxxx\".\n");
     out.push_str("# model: model id, example: \"DeepSeek-V3.2\" or \"gpt-5-mini\".\n");
     out.push_str("# base_url: chat-completions API root URL.\n");
-    out.push_str("# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n");
+    out.push_str(
+        "# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n",
+    );
     out.push_str("#                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n");
     out.push_str("#                 note: Authorization and Content-Type are reserved and cannot be overridden.\n\n");
     out.push_str(if cfg.is_enabled() {
@@ -3019,5 +3021,4 @@ mod tests {
             .expect("enabled field");
         assert_eq!(enabled.value, "Off");
     }
-
 }
