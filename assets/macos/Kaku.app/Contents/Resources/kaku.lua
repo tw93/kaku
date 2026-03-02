@@ -2399,14 +2399,14 @@ local kaku_light = {
   cursor_fg = '#FFFCF0',
   cursor_border = '#343331',
 
-  selection_bg = '#D5D3C7',
+  selection_bg = '#E8E6DB',
   selection_fg = '#100F0F',
 
   ansi = {
     '#100F0F', -- black
     '#AF3029', -- red
     '#4D7A23', -- green (darker for better contrast)
-    '#AD8301', -- yellow
+    '#9D7800', -- yellow
     '#2058A0', -- blue (for directory names)
     '#8B2660', -- magenta (slightly darker)
     '#0D6258', -- cyan (darker for light bg)
@@ -2417,7 +2417,7 @@ local kaku_light = {
     '#B7B5AC', -- bright black (comments, softer gray)
     '#D14D41', -- bright red
     '#879A39', -- bright green
-    '#D0A215', -- bright yellow
+    '#DAA520', -- bright yellow
     '#4385BE', -- bright blue
     '#CE5D97', -- bright magenta
     '#3AA99F', -- bright cyan
