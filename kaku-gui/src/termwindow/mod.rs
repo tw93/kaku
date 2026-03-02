@@ -2063,7 +2063,6 @@ impl TermWindow {
             }
         }
     }
-
 }
 
 impl TermWindow {
