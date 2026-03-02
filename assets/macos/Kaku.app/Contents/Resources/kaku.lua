@@ -189,8 +189,10 @@ local function check_user_custom_config()
 end
 check_user_custom_config()
 
--- Adaptive padding based on screen size (similar to font_size logic).
-local function is_small_screen()
+-- Two-tier display detection.
+-- low resolution screens use smaller spacing and 15px font.
+-- high resolution screens use default spacing and 17px font.
+local function is_low_resolution_screen()
   local success, screens = pcall(function()
     return wezterm.gui.screens()
   end)
@@ -199,7 +201,7 @@ local function is_small_screen()
     local width = tonumber(main.width or 0) or 0
     local height = tonumber(main.height or 0) or 0
     local short_edge = math.min(width, height)
-    -- Inline builtin screen detection (main_screen_is_builtin defined later).
+    -- Inline builtin screen detection.
     local name = string.lower(tostring(main.name or ''))
     local is_builtin = name == 'color lcd'
       or string.find(name, 'built-in', 1, true)
@@ -238,33 +240,33 @@ local function is_light_theme()
   return false
 end
 
--- Compute once; all four padding helpers below share this result.
-local small_screen = is_small_screen()
+-- Compute once; all spacing helpers below share this result.
+local low_resolution_screen = is_low_resolution_screen()
 
 local function get_default_padding()
-  if small_screen then
-    return { left = '30px', right = '30px', top = '20px', bottom = '15px' }
+  if low_resolution_screen then
+    return { left = '26px', right = '26px', top = '26px', bottom = '14px' }
   end
-  return { left = '40px', right = '40px', top = '30px', bottom = '20px' }
+  return { left = '40px', right = '40px', top = '40px', bottom = '20px' }
 end
 
 local function get_fullscreen_padding()
-  if small_screen then
-    return { left = '15px', right = '15px', top = '15px', bottom = '0px' }
+  if low_resolution_screen then
+    return { left = '14px', right = '14px', top = '14px', bottom = '0px' }
   end
   return { left = '20px', right = '20px', top = '20px', bottom = '0px' }
 end
 
 local function get_yazi_padding()
-  if small_screen then
-    return { left = '30px', right = '30px', top = '20px', bottom = '0px' }
+  if low_resolution_screen then
+    return { left = '26px', right = '26px', top = '26px', bottom = '0px' }
   end
-  return { left = '40px', right = '40px', top = '30px', bottom = '0px' }
+  return { left = '40px', right = '40px', top = '40px', bottom = '0px' }
 end
 
 local function get_yazi_fullscreen_padding()
-  if small_screen then
-    return { left = '15px', right = '15px', top = '8px', bottom = '0px' }
+  if low_resolution_screen then
+    return { left = '14px', right = '14px', top = '8px', bottom = '0px' }
   end
   return { left = '20px', right = '20px', top = '10px', bottom = '0px' }
 end
@@ -358,7 +360,9 @@ local function update_window_config(window, is_full_screen, pane)
     end
   end
 
-  needs_update = padding_needs_update or tab_bar_needs_update or alignment_needs_update
+  needs_update = padding_needs_update
+    or tab_bar_needs_update
+    or alignment_needs_update
 
   -- Skip update if dimensions changed rapidly (within 1 second) and state is stable
   -- This prevents padding flicker during fullscreen animation
@@ -1737,7 +1741,7 @@ local KAKU_SURFACE_ACTIVE = '#29263c'
 local KAKU_GREEN = '#61ffca'
 local KAKU_ORANGE = '#ffca85'
 local KAKU_PINK = '#f694ff'
-local KAKU_BLUE = '#5fa8ff'
+local KAKU_BLUE = '#a277ff'
 local KAKU_BRIGHT_BLUE = '#8cc2ff'
 local KAKU_RED = '#ff6767'
 
@@ -2077,49 +2081,20 @@ config.font_rules = {
 }
 
 config.bold_brightens_ansi_colors = false
-local function main_screen_is_builtin(screen)
-  local name = string.lower(tostring(screen.name or ''))
-  if name == 'color lcd' then
-    return true
-  end
-  if string.find(name, 'built-in', 1, true) then
-    return true
-  end
-  if string.find(name, 'built in', 1, true) then
-    return true
-  end
-  if string.find(name, '内建', 1, true) then
-    return true
-  end
-  return false
-end
 
 -- Auto-adjust font size using main-screen pixel size.
--- Built-in 13-inch class displays use 15px.
--- High-resolution displays use 17px.
+-- low-resolution screens use 15px.
+-- high-resolution screens use 17px.
 local function get_font_size()
+  if low_resolution_screen then
+    return 15.0
+  end
+
   local success, screens = pcall(function()
     return wezterm.gui.screens()
   end)
   if success and screens and screens.main then
     local main = screens.main
-    local width = tonumber(main.width or 0) or 0
-    local height = tonumber(main.height or 0) or 0
-    local short_edge = math.min(width, height)
-    local is_builtin = main_screen_is_builtin(main)
-    if short_edge > 0 then
-      if is_builtin then
-        if short_edge <= 1700 then
-          return 15.0
-        end
-        return 17.0
-      end
-      if short_edge < 1800 then
-        return 15.0
-      end
-      return 17.0
-    end
-
     -- Fallback when pixel dimensions are unavailable.
     local dpi = tonumber(main.effective_dpi or 72) or 72
     if dpi < 110 then
@@ -2279,18 +2254,18 @@ local kaku_light = {
     '#2058A0', -- blue (for directory names)
     '#8B2660', -- magenta (slightly darker)
     '#0D6258', -- cyan (darker for light bg)
-    '#343331', -- white (dark gray for light bg)
+    '#878580', -- white (Flexoki tx-2, good contrast)
   },
 
   brights = {
-    '#6B6A66', -- bright black (comments, lighter gray)
+    '#B7B5AC', -- bright black (comments, softer gray)
     '#D14D41', -- bright red
     '#879A39', -- bright green
     '#D0A215', -- bright yellow
     '#4385BE', -- bright blue
     '#CE5D97', -- bright magenta
     '#3AA99F', -- bright cyan
-    '#100F0F', -- bright white (dark text for light bg)
+    '#6F6E69', -- bright white (Flexoki tx-3)
   },
 
   split = '#B8B7AD',
