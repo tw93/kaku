@@ -221,7 +221,8 @@ fn spawn_kaku_update() {
         log::info!("spawn_kaku_update: launching {:?}", kaku_gui);
 
         // Find kaku CLI in the same directory as kaku-gui
-        let kaku_cli = kaku_gui.parent()
+        let kaku_cli = kaku_gui
+            .parent()
             .map(|p| p.join("kaku"))
             .filter(|p| p.exists())
             .unwrap_or_else(|| {
