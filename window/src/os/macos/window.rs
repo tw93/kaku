@@ -2378,6 +2378,7 @@ impl Inner {
         &mut self,
         virtual_key_code: u16,
         modifier_flags: NSEventModifierFlags,
+        force_dead_keys: bool,
     ) -> anyhow::Result<TranslateStatus> {
         let keyboard = Keyboard::new();
 
@@ -2387,6 +2388,8 @@ impl Inner {
 
         let use_dead_keys = if !config.use_dead_keys {
             false
+        } else if force_dead_keys {
+            true
         } else if mods.contains(Modifiers::LEFT_ALT) {
             config.send_composed_key_when_left_alt_is_pressed
         } else if mods.contains(Modifiers::RIGHT_ALT) {
@@ -3679,7 +3682,7 @@ impl WindowView {
                     return;
                 }
 
-                match inner.translate_key_event(virtual_key, modifier_flags) {
+                match inner.translate_key_event(virtual_key, modifier_flags, chars.is_empty()) {
                     Ok(TranslateStatus::Composing(composing)) => {
                         // Next key press in dead key sequence is pending.
                         inner.events.dispatch(WindowEvent::AdviseDeadKeyStatus(
@@ -3878,10 +3881,21 @@ impl WindowView {
             } else if (only_left_alt && !send_composed_key_when_left_alt_is_pressed)
                 || (only_right_alt && !send_composed_key_when_right_alt_is_pressed)
             {
-                // Take the unmodified key only!
-                match key_string_to_key_code(unmod) {
-                    Some(key) => (key, None),
-                    None => return,
+                // Usually we take the unmodified key when compose is disabled for this ALT side.
+                // However, some layouts (eg: Turkish) produce ASCII symbols such as `~`
+                // via Option chords. Preserve those produced symbols and clear ALT by
+                // pairing them with a raw/unmodified key.
+                let raw = key_string_to_key_code(unmod);
+                match (&key, &raw) {
+                    (KeyCode::Char(c), Some(_))
+                        if c.is_ascii_punctuation() && !chars.is_empty() && chars != unmod =>
+                    {
+                        (key, raw)
+                    }
+                    _ => match raw {
+                        Some(key) => (key, None),
+                        None => return,
+                    },
                 }
             } else if chars.is_empty() || chars == unmod {
                 (key, None)
