@@ -167,38 +167,32 @@ fn run_kaku_subcommand_in_shell_new_window(subcommand: &str) {
     let fallback_bin = shlex::try_quote(&kaku_bin)
         .map(|q| q.into_owned())
         .unwrap_or_else(|_| kaku_bin.clone());
-    let command = format!("kaku {subcommand} || {fallback_bin} {subcommand}\n");
 
-    promise::spawn::spawn(async move {
-        use config::keyassignment::SpawnTabDomain;
-        use wezterm_term::TerminalSize;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let command_str = format!("kaku {subcommand} || {fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read dummy");
 
-        let mux = Mux::get();
-        let workspace = mux.active_workspace();
+    promise::spawn::spawn_into_main_thread(async move {
+        use crate::spawn::SpawnWhere;
+        use config::keyassignment::SpawnCommand;
+        use std::sync::Arc;
 
-        match mux
-            .spawn_tab_or_window(
-                None,
-                SpawnTabDomain::DomainName("local".to_string()),
-                None,
-                None,
-                None,
-                TerminalSize::default(),
-                None,
-                workspace,
-                None,
-            )
-            .await
-        {
-            Ok((_tab, pane, _window_id)) => {
-                if let Err(err) = write!(pane.writer(), "{command}") {
-                    log::warn!("failed to send kaku {subcommand} to pane: {err:#}");
-                }
-            }
-            Err(err) => {
-                log::error!("Failed to spawn menu command `kaku {subcommand}`: {err:#}");
-            }
-        }
+        let config = fast_config_snapshot();
+        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+        let size = config.initial_size(dpi as u32, None);
+        let term_config = Arc::new(config::TermConfig::with_config(config));
+
+        let spawn_cmd = SpawnCommand {
+            args: Some(vec![shell, "-l".to_string(), "-c".to_string(), command_str]),
+            ..Default::default()
+        };
+
+        crate::spawn::spawn_command_impl(
+            &spawn_cmd,
+            SpawnWhere::NewWindow,
+            size,
+            None,
+            term_config,
+        );
     })
     .detach();
 }

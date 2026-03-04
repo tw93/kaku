@@ -538,26 +538,46 @@ impl App {
     /// format; the caller should set skip_write=true to protect the original line.
     fn normalize_value(lua_key: &str, raw: &str) -> Option<String> {
         match lua_key {
-            "copy_on_select" | "bell_tab_indicator" | "bell_dock_badge" => Some(if raw == "true" {
-                "On".into()
-            } else {
-                "Off".into()
-            }),
-            "hide_tab_bar_if_only_one_tab" => Some(if raw == "true" {
-                "Auto".into()
-            } else {
-                "Always".into()
-            }),
-            "tab_bar_at_bottom" => Some(if raw == "true" {
-                "Bottom".into()
-            } else {
-                "Top".into()
-            }),
-            "harfbuzz_features" => Some(if raw.contains("calt=0") {
-                "Off".into()
-            } else {
-                "On".into()
-            }),
+            "copy_on_select" | "bell_tab_indicator" | "bell_dock_badge" => {
+                if raw == "true" {
+                    Some("On".into())
+                } else if raw == "false" {
+                    Some("Off".into())
+                } else {
+                    None
+                }
+            }
+            "hide_tab_bar_if_only_one_tab" => {
+                if raw == "true" {
+                    Some("Auto".into())
+                } else if raw == "false" {
+                    Some("Always".into())
+                } else {
+                    None
+                }
+            }
+            "tab_bar_at_bottom" => {
+                if raw == "true" {
+                    Some("Bottom".into())
+                } else if raw == "false" {
+                    Some("Top".into())
+                } else {
+                    None
+                }
+            }
+            "harfbuzz_features" => {
+                let stripped = raw.replace([' ', '\'', '"'], "");
+                if stripped == "{calt=0,clig=0,liga=0}" {
+                    Some("Off".into())
+                } else if stripped == "{}"
+                    || stripped.is_empty()
+                    || stripped.eq_ignore_ascii_case("nil")
+                {
+                    Some("On".into())
+                } else {
+                    None
+                }
+            }
             "window_decorations" => {
                 let value = raw.trim().trim_matches('\'').trim_matches('"');
                 if value.contains("MACOS_FORCE_DISABLE_SHADOW") {
