@@ -260,7 +260,7 @@ impl TmuxDomainState {
     }
 
     /// schedule a `send_next_command` into main thread
-    pub fn schedule_send_next_command(domain_id: usize) {
+    pub fn schedule_send_next_command(domain_id: DomainId) {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
             if let Some(domain) = mux.get_domain(domain_id) {

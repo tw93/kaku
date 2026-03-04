@@ -24,10 +24,65 @@ use wezterm_term::{
 };
 
 static PANE_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
-pub type PaneId = usize;
+
+#[repr(transparent)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct PaneId(usize);
+
+impl PaneId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for PaneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for PaneId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<usize>().map(PaneId)
+    }
+}
+
+impl From<usize> for PaneId {
+    fn from(v: usize) -> Self {
+        Self(v)
+    }
+}
+impl From<PaneId> for usize {
+    fn from(v: PaneId) -> usize {
+        v.0
+    }
+}
+impl From<PaneId> for u64 {
+    fn from(v: PaneId) -> u64 {
+        v.0 as u64
+    }
+}
+impl std::convert::TryFrom<u64> for PaneId {
+    type Error = <usize as std::convert::TryFrom<u64>>::Error;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(PaneId)
+    }
+}
+impl std::convert::TryFrom<i64> for PaneId {
+    type Error = <usize as std::convert::TryFrom<i64>>::Error;
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(PaneId)
+    }
+}
 
 pub fn alloc_pane_id() -> PaneId {
-    PANE_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
+    PaneId(PANE_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Holds a pane's reader along with the optional raw file descriptor

@@ -479,7 +479,7 @@ pub fn allocate(
         grab_mouse: true,
     };
 
-    let domain_id = 0;
+    let domain_id = DomainId::new(0);
     let pane = TermWizTerminalPane::new(domain_id, size, input_tx, render_pipe.read, Some(config));
 
     // Add the tab to the mux so that the output is processed

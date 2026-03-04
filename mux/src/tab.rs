@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use rangeset::intersects_range;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 use url::Url;
 use wezterm_term::{StableRowIndex, TerminalSize};
@@ -18,7 +18,60 @@ pub type Tree = bintree::Tree<Arc<dyn Pane>, SplitDirectionAndSize>;
 pub type Cursor = bintree::Cursor<Arc<dyn Pane>, SplitDirectionAndSize>;
 
 static TAB_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
-pub type TabId = usize;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TabId(usize);
+
+impl TabId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for TabId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<usize>().map(TabId)
+    }
+}
+
+impl From<usize> for TabId {
+    fn from(v: usize) -> Self {
+        Self(v)
+    }
+}
+impl From<TabId> for usize {
+    fn from(v: TabId) -> usize {
+        v.0
+    }
+}
+impl From<TabId> for u64 {
+    fn from(v: TabId) -> u64 {
+        v.0 as u64
+    }
+}
+impl TryFrom<u64> for TabId {
+    type Error = <usize as TryFrom<u64>>::Error;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(TabId)
+    }
+}
+impl TryFrom<i64> for TabId {
+    type Error = <usize as TryFrom<i64>>::Error;
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(TabId)
+    }
+}
 
 #[derive(Default)]
 struct Recency {
@@ -801,7 +854,7 @@ impl Tab {
 impl TabInner {
     fn new(size: &TerminalSize) -> Self {
         Self {
-            id: TAB_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed),
+            id: TabId(TAB_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)),
             pane: Some(Tree::new()),
             size: *size,
             size_before_zoom: *size,
@@ -2513,7 +2566,7 @@ mod test {
             unimplemented!()
         }
         fn domain_id(&self) -> DomainId {
-            1
+            DomainId::new(1)
         }
         fn is_mouse_grabbed(&self) -> bool {
             false
@@ -2537,7 +2590,7 @@ mod test {
         };
 
         let tab = Tab::new(&size);
-        tab.assign_pane(&FakePane::new(1, size));
+        tab.assign_pane(&FakePane::new(PaneId::new(1), size));
 
         let panes = tab.iter_panes();
         assert_eq!(1, panes.len());
@@ -2625,7 +2678,7 @@ mod test {
                     direction: SplitDirection::Horizontal,
                     ..Default::default()
                 },
-                FakePane::new(2, horz_size.second),
+                FakePane::new(PaneId::new(2), horz_size.second),
             )
             .unwrap();
         assert_eq!(new_index, 1);
@@ -2641,7 +2694,7 @@ mod test {
         assert_eq!(24, panes[0].height);
         assert_eq!(390, panes[0].pixel_width);
         assert_eq!(600, panes[0].pixel_height);
-        assert_eq!(1, panes[0].pane.pane_id());
+        assert_eq!(PaneId::new(1), panes[0].pane.pane_id());
 
         assert_eq!(1, panes[1].index);
         assert_eq!(true, panes[1].is_active);
@@ -2651,7 +2704,7 @@ mod test {
         assert_eq!(24, panes[1].height);
         assert_eq!(400, panes[1].pixel_width);
         assert_eq!(600, panes[1].pixel_height);
-        assert_eq!(2, panes[1].pane.pane_id());
+        assert_eq!(PaneId::new(2), panes[1].pane.pane_id());
 
         let vert_size = tab
             .compute_split_size(
@@ -2671,7 +2724,7 @@ mod test {
                     target_is_second: true,
                     size: Default::default(),
                 },
-                FakePane::new(3, vert_size.second),
+                FakePane::new(PaneId::new(3), vert_size.second),
             )
             .unwrap();
         assert_eq!(new_index, 1);
@@ -2687,7 +2740,7 @@ mod test {
         assert_eq!(11, panes[0].height);
         assert_eq!(390, panes[0].pixel_width);
         assert_eq!(275, panes[0].pixel_height);
-        assert_eq!(1, panes[0].pane.pane_id());
+        assert_eq!(PaneId::new(1), panes[0].pane.pane_id());
 
         assert_eq!(1, panes[1].index);
         assert_eq!(true, panes[1].is_active);
@@ -2697,7 +2750,7 @@ mod test {
         assert_eq!(12, panes[1].height);
         assert_eq!(390, panes[1].pixel_width);
         assert_eq!(300, panes[1].pixel_height);
-        assert_eq!(3, panes[1].pane.pane_id());
+        assert_eq!(PaneId::new(3), panes[1].pane.pane_id());
 
         assert_eq!(2, panes[2].index);
         assert_eq!(false, panes[2].is_active);
@@ -2707,7 +2760,7 @@ mod test {
         assert_eq!(24, panes[2].height);
         assert_eq!(400, panes[2].pixel_width);
         assert_eq!(600, panes[2].pixel_height);
-        assert_eq!(2, panes[2].pane.pane_id());
+        assert_eq!(PaneId::new(2), panes[2].pane.pane_id());
 
         tab.resize_split_by(1, 1);
         let panes = tab.iter_panes();
