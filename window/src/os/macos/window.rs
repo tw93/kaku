@@ -2638,6 +2638,27 @@ fn is_symbol_virtual_key(vkey: u16) -> bool {
     .contains(&vkey)
 }
 
+fn is_alnum_virtual_key(vkey: u16) -> bool {
+    [
+        kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F, kVK_ANSI_G,
+        kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L, kVK_ANSI_M, kVK_ANSI_N,
+        kVK_ANSI_O, kVK_ANSI_P, kVK_ANSI_Q, kVK_ANSI_R, kVK_ANSI_S, kVK_ANSI_T, kVK_ANSI_U,
+        kVK_ANSI_V, kVK_ANSI_W, kVK_ANSI_X, kVK_ANSI_Y, kVK_ANSI_Z, kVK_ANSI_0, kVK_ANSI_1,
+        kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8,
+        kVK_ANSI_9,
+    ]
+    .contains(&vkey)
+}
+
+fn is_command_alnum_shortcut(modifiers: Modifiers, virtual_key: u16) -> bool {
+    // Require Cmd (SUPER), disallow Alt/Ctrl (Shift is permitted).
+    // Prevents Cmd+alnum shortcuts from failing when a non-Latin IME is active,
+    // because macOS NSMenu keyEquivalent matching can return the wrong character.
+    let must_have = Modifiers::SUPER;
+    let must_not = Modifiers::ALT | Modifiers::CTRL | Modifiers::LEFT_ALT | Modifiers::RIGHT_ALT;
+    modifiers.contains(must_have) && !modifiers.intersects(must_not) && is_alnum_virtual_key(virtual_key)
+}
+
 fn should_intercept_special_shortcut(chars: &str, modifiers: Modifiers, virtual_key: u16) -> bool {
     let command_period = virtual_key == kVK_ANSI_Period && modifiers == Modifiers::SUPER;
     let command_shift_symbol = modifiers == (Modifiers::SUPER | Modifiers::SHIFT)
@@ -2757,6 +2778,33 @@ mod tests {
         assert!(!should_intercept_special_shortcut(
             "~",
             Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_Grave,
+        ));
+    }
+
+    #[test]
+    fn command_alnum_shortcuts_are_stable_by_virtual_key() {
+        // Cmd+letter
+        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_W));
+        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_K));
+        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_1));
+        // Cmd+Shift+letter (Shift is allowed)
+        assert!(is_command_alnum_shortcut(
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_D,
+        ));
+        assert!(is_command_alnum_shortcut(
+            Modifiers::SUPER | Modifiers::SHIFT,
+            kVK_ANSI_A,
+        ));
+        // Cmd+Alt+letter → false (Alt combos serve different purposes)
+        assert!(!is_command_alnum_shortcut(
+            Modifiers::SUPER | Modifiers::ALT | Modifiers::LEFT_ALT,
+            kVK_ANSI_W,
+        ));
+        // Non-alnum key → false
+        assert!(!is_command_alnum_shortcut(
+            Modifiers::SUPER,
             kVK_ANSI_Grave,
         ));
     }
@@ -3665,6 +3713,8 @@ impl WindowView {
                 // bindings can match stable base keys like "," across layouts/IME.
                 // Use exact match to avoid affecting Cmd+Ctrl+Shift+symbol etc.
                 (true, unmod)
+            } else if is_command_alnum_shortcut(modifiers, virtual_key) {
+                (true, unmod)
             } else {
                 (false, unmod)
             };
@@ -3775,7 +3825,8 @@ impl WindowView {
         // That shows up here as unmod=`` with modifiers=CTRL.  In this situation
         // we want to cancel the modifiers out so that we just focus on
         // `chars` instead.
-        let modifiers = if unmod.is_empty() {
+        let command_alnum_shortcut = is_command_alnum_shortcut(modifiers, virtual_key);
+        let modifiers = if unmod.is_empty() && !command_alnum_shortcut {
             Modifiers::NONE
         } else {
             modifiers
@@ -4009,11 +4060,12 @@ impl WindowView {
         );
 
         let special_shortcut = should_intercept_special_shortcut(chars, modifiers, virtual_key);
+        let command_alnum_shortcut = is_command_alnum_shortcut(modifiers, virtual_key);
 
         let command_non_menu_key =
             modifiers.contains(Modifiers::SUPER) && is_non_menu_virtual_key(virtual_key);
 
-        if special_shortcut || command_non_menu_key {
+        if special_shortcut || command_non_menu_key || command_alnum_shortcut {
             // Synthesize a key down event for this, because macOS will
             // not do that, even though we tell it that we handled this event.
             // <https://github.com/wezterm/wezterm/issues/1867>
