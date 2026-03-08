@@ -442,6 +442,9 @@ local lazygit_command_probe = { value = nil, command = nil, checked_at = 0 }
 local lazygit_command_probe_interval_secs = 30
 local yazi_command_probe = { value = nil, command = nil, checked_at = 0 }
 local yazi_command_probe_interval_secs = 30
+local sshfs_command_probe = { value = nil, command = nil, checked_at = 0 }
+local sshfs_command_probe_interval_secs = 30
+local remote_files_mount_root = home_dir and (home_dir .. "/Library/Caches/dev.kaku/sshfs") or nil
 local lazygit_hint_startup_grace_secs = 3
 local lazygit_hint_warmup_until_secs = now_secs() + lazygit_hint_startup_grace_secs
 local lazygit_hint_schedule_cooldown_secs = 8
@@ -459,6 +462,16 @@ local function trim_surrounding_whitespace(value)
     return ""
   end
   return value:gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function run_process(args)
+  local ok, success, stdout, stderr = pcall(function()
+    return wezterm.run_child_process(args)
+  end)
+  if not ok then
+    return false, "", tostring(success or "")
+  end
+  return success, tostring(stdout or ""), tostring(stderr or "")
 end
 
 local function normalize_ai_summary(value, fallback)
@@ -1666,6 +1679,38 @@ local function resolve_yazi_command()
   return resolved
 end
 
+local function resolve_sshfs_command()
+  local now = now_secs()
+  local cached_value = sshfs_command_probe.value
+  if cached_value ~= nil then
+    local age = now - sshfs_command_probe.checked_at
+    if cached_value or age < sshfs_command_probe_interval_secs then
+      return sshfs_command_probe.command
+    end
+  end
+
+  local candidates = {
+    "sshfs",
+    "/opt/homebrew/bin/sshfs",
+    "/usr/local/bin/sshfs",
+  }
+  local resolved = nil
+  for _, cmd in ipairs(candidates) do
+    local call_ok, run_result = pcall(function()
+      return select(1, wezterm.run_child_process({ cmd, "--version" }))
+    end)
+    if call_ok and run_result then
+      resolved = cmd
+      break
+    end
+  end
+
+  sshfs_command_probe.value = resolved ~= nil
+  sshfs_command_probe.command = resolved
+  sshfs_command_probe.checked_at = now
+  return resolved
+end
+
 local function pane_is_lazygit(pane)
   if not pane then
     return false
@@ -1715,6 +1760,439 @@ end
 
 local function show_yazi_toast(window, pane, event_name)
   show_lazygit_toast(window, pane, event_name)
+end
+
+local function show_remote_files_toast(window, message, timeout_ms)
+  if not window then
+    return
+  end
+  pcall(function()
+    window:toast_notification("Remote Files", message, nil, timeout_ms or 4000)
+  end)
+end
+
+local function extract_ssh_domain_target(domain_name)
+  if type(domain_name) ~= "string" then
+    return nil
+  end
+
+  local target = domain_name:match("^SSH:(.+)$")
+  if not target then
+    target = domain_name:match("^SSHMUX:(.+)$")
+  end
+  target = trim_surrounding_whitespace(target or "")
+  if target == "" then
+    return nil
+  end
+  return target
+end
+
+local function sanitize_mount_component(value)
+  local component = trim_surrounding_whitespace(tostring(value or ""))
+  component = component:gsub("[^%w%._%-@]", "_")
+  if component == "" then
+    return "remote"
+  end
+  return component
+end
+
+local function ssh_option_needs_value(token)
+  if type(token) ~= "string" or #token ~= 2 or token:sub(1, 1) ~= "-" then
+    return false
+  end
+
+  local option = token:sub(2, 2)
+  return option == "B"
+    or option == "b"
+    or option == "c"
+    or option == "D"
+    or option == "E"
+    or option == "e"
+    or option == "F"
+    or option == "I"
+    or option == "i"
+    or option == "J"
+    or option == "L"
+    or option == "l"
+    or option == "m"
+    or option == "O"
+    or option == "o"
+    or option == "p"
+    or option == "Q"
+    or option == "R"
+    or option == "S"
+    or option == "W"
+    or option == "w"
+end
+
+local function normalize_ssh_target(target)
+  local host = trim_surrounding_whitespace(target or "")
+  if host == "" then
+    return nil
+  end
+
+  local at = host:match(".*@(.+)$")
+  if at and at ~= "" then
+    host = at
+  end
+
+  local bracketed = host:match("^%[([^%]]+)%]")
+  if bracketed and bracketed ~= "" then
+    return bracketed
+  end
+
+  local maybe_host, maybe_port = host:match("^(.*):(%d+)$")
+  if maybe_host and maybe_host ~= "" and maybe_port and maybe_port ~= "" then
+    host = maybe_host
+  end
+
+  if host == "" then
+    return nil
+  end
+  return host
+end
+
+local function ssh_target_from_tokens(tokens)
+  if type(tokens) ~= "table" or #tokens == 0 then
+    return nil
+  end
+
+  local command = basename(tostring(tokens[1] or ""))
+  if command ~= "ssh" then
+    return nil
+  end
+
+  local expect_value = false
+  for i = 2, #tokens do
+    local token = tostring(tokens[i] or "")
+    if expect_value then
+      expect_value = false
+    elseif token == "--" then
+      return nil
+    elseif token:sub(1, 1) == "-" then
+      expect_value = ssh_option_needs_value(token)
+    else
+      return normalize_ssh_target(token)
+    end
+  end
+
+  return nil
+end
+
+local function shell_split(command)
+  local tokens = {}
+  for token in tostring(command or ""):gmatch("%S+") do
+    tokens[#tokens + 1] = token
+  end
+  return tokens
+end
+
+local function ssh_target_from_command(command)
+  local text = trim_surrounding_whitespace(command or "")
+  if text == "" then
+    return nil
+  end
+  return ssh_target_from_tokens(shell_split(text))
+end
+
+local function pane_domain_name(pane)
+  if not pane then
+    return ""
+  end
+
+  local ok, value = pcall(function()
+    if pane.get_domain_name then
+      return pane:get_domain_name()
+    end
+    return pane.domain_name
+  end)
+  if not ok then
+    return ""
+  end
+  return trim_surrounding_whitespace(value or "")
+end
+
+local function pane_user_vars(pane)
+  if not pane then
+    return nil
+  end
+
+  local ok, vars = pcall(function()
+    if pane.get_user_vars then
+      return pane:get_user_vars()
+    end
+    return pane.user_vars
+  end)
+  if not ok or type(vars) ~= "table" then
+    return nil
+  end
+  return vars
+end
+
+local function pane_foreground_process_name(pane)
+  if not pane then
+    return ""
+  end
+
+  local ok, value = pcall(function()
+    if pane.get_foreground_process_name then
+      return pane:get_foreground_process_name()
+    end
+    return pane.foreground_process_name
+  end)
+  if not ok then
+    return ""
+  end
+  return trim_surrounding_whitespace(value or "")
+end
+
+local function pane_foreground_process_info(pane)
+  if not pane then
+    return nil
+  end
+
+  local ok, info = pcall(function()
+    return pane:get_foreground_process_info()
+  end)
+  if not ok or type(info) ~= "table" then
+    return nil
+  end
+  return info
+end
+
+local function pane_cwd_value(pane)
+  if not pane then
+    return nil
+  end
+
+  local ok, value = pcall(function()
+    if pane.get_current_working_dir then
+      return pane:get_current_working_dir()
+    end
+    return pane.current_working_dir
+  end)
+  if not ok then
+    return nil
+  end
+  return value
+end
+
+local function resolve_remote_target_from_pane(pane)
+  if not pane then
+    return nil
+  end
+
+  local domain_name = pane_domain_name(pane)
+  local domain_target = extract_ssh_domain_target(domain_name)
+  if domain_target then
+    return domain_target
+  end
+
+  local user_vars = pane_user_vars(pane)
+  if type(user_vars) == "table" then
+    local prog_target = ssh_target_from_command(user_vars.WEZTERM_PROG)
+    if prog_target then
+      return prog_target
+    end
+  end
+
+  local proc_name = pane_foreground_process_name(pane)
+  if basename(proc_name) == "ssh" then
+    local info = pane_foreground_process_info(pane)
+    if info and type(info.argv) == "table" then
+      local argv_target = ssh_target_from_tokens(info.argv)
+      if argv_target then
+        return argv_target
+      end
+    end
+  end
+
+  local cwd = pane_cwd_value(pane)
+  if cwd and type(cwd) == "table" then
+    local host = trim_surrounding_whitespace(cwd.host or "")
+    if host ~= "" then
+      local username = trim_surrounding_whitespace(cwd.username or "")
+      if username ~= "" then
+        return username .. "@" .. host
+      end
+      return host
+    end
+  end
+
+  return nil
+end
+
+local function mountpoint_is_active(path)
+  local ok = select(1, run_process({
+    "sh",
+    "-lc",
+    'mount | grep -F " on $1 (" >/dev/null',
+    "kaku-remote-files",
+    path,
+  }))
+  return ok
+end
+
+local function path_exists(path)
+  if not path or path == "" then
+    return false
+  end
+  return select(1, run_process({
+    "/usr/bin/test",
+    "-e",
+    path,
+  }))
+end
+
+local function ensure_remote_mount_root()
+  if not remote_files_mount_root or remote_files_mount_root == "" then
+    return false, "HOME is unavailable; cannot prepare a mount directory."
+  end
+
+  local ok, _, stderr = run_process({
+    "/bin/mkdir",
+    "-p",
+    remote_files_mount_root,
+  })
+  if ok then
+    return true, remote_files_mount_root
+  end
+
+  local message = trim_surrounding_whitespace(stderr)
+  if message == "" then
+    message = "failed to create the local mount root"
+  end
+  return false, message
+end
+
+local function ensure_remote_mount(sshfs_cmd, remote_target, mount_path)
+  local root_ok, root_or_err = ensure_remote_mount_root()
+  if not root_ok then
+    return false, root_or_err
+  end
+
+  local mkdir_ok, _, mkdir_stderr = run_process({
+    "/bin/mkdir",
+    "-p",
+    mount_path,
+  })
+  if not mkdir_ok then
+    local message = trim_surrounding_whitespace(mkdir_stderr)
+    if message == "" then
+      message = "failed to create the mount path"
+    end
+    return false, message
+  end
+
+  if mountpoint_is_active(mount_path) then
+    return true, mount_path
+  end
+
+  -- Fail fast when the SSH alias still needs an interactive password prompt.
+  local ssh_ok, _, ssh_stderr = run_process({
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    remote_target,
+    "true",
+  })
+  if not ssh_ok then
+    local message = trim_surrounding_whitespace(ssh_stderr)
+    if message == "" then
+      message = "non-interactive SSH auth failed; key or agent auth is required"
+    end
+    return false, message
+  end
+
+  local volume_name = "Kaku-" .. sanitize_mount_component(remote_target)
+  local mount_ok, _, mount_stderr = run_process({
+    sshfs_cmd,
+    remote_target .. ":/",
+    mount_path,
+    "-o",
+    "reconnect,defer_permissions,volname=" .. volume_name,
+  })
+  if mount_ok and mountpoint_is_active(mount_path) then
+    return true, mount_path
+  end
+
+  local message = trim_surrounding_whitespace(mount_stderr)
+  if message == "" then
+    message = "sshfs mount failed"
+  end
+  return false, message
+end
+
+local function remote_open_path(mount_path, remote_cwd)
+  local clean_cwd = trim_surrounding_whitespace(remote_cwd or "")
+  if clean_cwd == "" or clean_cwd == "/" then
+    return mount_path
+  end
+
+  local candidate
+  if clean_cwd:sub(1, 1) == "/" then
+    candidate = mount_path .. clean_cwd
+  else
+    candidate = mount_path .. "/" .. clean_cwd
+  end
+
+  if path_exists(candidate) then
+    return candidate
+  end
+  return mount_path
+end
+
+local function open_remote_files(window, pane)
+  pane = resolve_active_pane(window, pane)
+  if not pane then
+    show_remote_files_toast(window, "No active pane.")
+    return
+  end
+
+  local remote_target = resolve_remote_target_from_pane(pane)
+  if not remote_target then
+    show_remote_files_toast(window, "Only SSH sessions are supported right now.")
+    return
+  end
+
+  local yazi_cmd = resolve_yazi_command()
+  if not yazi_cmd then
+    show_remote_files_toast(window, "Yazi not found. Run kaku init.")
+    return
+  end
+
+  local sshfs_cmd = resolve_sshfs_command()
+  if not sshfs_cmd then
+    show_remote_files_toast(window, "sshfs not found. Install macFUSE + sshfs first.", 5000)
+    return
+  end
+
+  if not remote_files_mount_root or remote_files_mount_root == "" then
+    show_remote_files_toast(window, "HOME is unavailable; cannot prepare a mount directory.", 5000)
+    return
+  end
+
+  local mount_path = remote_files_mount_root .. "/" .. sanitize_mount_component(remote_target)
+  local mount_ok, mount_or_err = ensure_remote_mount(sshfs_cmd, remote_target, mount_path)
+  if not mount_ok then
+    show_remote_files_toast(window, "Mount failed: " .. mount_or_err, 6000)
+    return
+  end
+
+  local open_path = remote_open_path(mount_or_err, pane_cwd(pane))
+  local open_ok, open_err = pcall(function()
+    window:perform_action(
+      wezterm.action.SpawnCommandInNewTab({
+        domain = "DefaultDomain",
+        cwd = open_path,
+        args = { yazi_cmd, open_path },
+      }),
+      pane
+    )
+  end)
+  if not open_ok then
+    show_remote_files_toast(window, "Failed to open Yazi: " .. trim_surrounding_whitespace(tostring(open_err or "")), 5000)
+  end
 end
 
 local function maybe_show_lazygit_hint(window, pane)
@@ -2029,6 +2507,10 @@ end)
 
 wezterm.on('kaku-launch-yazi', function(window, pane)
   launch_yazi(window, pane)
+end)
+
+wezterm.on('kaku-open-remote-files', function(window, pane)
+  open_remote_files(window, pane)
 end)
 
 wezterm.on('kaku-ai-apply-last-fix', function(window, pane)
@@ -2732,6 +3214,13 @@ config.keys = {
     key = 'Y',
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('kaku-launch-yazi'),
+  },
+
+  -- Cmd+Shift+R: open the current SSH domain in a local yazi tab via sshfs
+  {
+    key = 'R',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-open-remote-files'),
   },
 
   -- Cmd+Ctrl+F: toggle fullscreen

@@ -709,9 +709,10 @@ impl CommandDef {
                     EmitEvent(name) if name == "run-kaku-ai-config" => 21,
                     EmitEvent(name) if name == "kaku-launch-lazygit" => 22,
                     EmitEvent(name) if name == "kaku-launch-yazi" => 23,
+                    EmitEvent(name) if name == "kaku-open-remote-files" => 24,
                     SplitVertical(_) | SplitHorizontal(_) | SplitPane(_) => 30,
                     CloseCurrentTab { .. } | CloseCurrentPane { .. } => 40,
-                    ActivateCommandPalette => 24,
+                    ActivateCommandPalette => 25,
                     ShowLauncher | ShowLauncherArgs(_) => 50,
                     AttachDomain(_) => 70,
                     DetachDomain(_) => 80,
@@ -777,8 +778,8 @@ impl CommandDef {
             match title {
                 "Shell" => match rank {
                     0..=20 => 1,  // New Window, New Tab
-                    21..=25 => 2, // AI Config, Lazygit, Yazi, Command Palette
-                    26..=35 => 3, // Split
+                    21..=26 => 2, // AI Config, Lazygit, Yazi, Remote Files, Command Palette
+                    27..=35 => 3, // Split
                     36..=45 => 4, // Close
                     46..=55 => 5, // Launcher
                     _ => 6,       // Attach/Detach and others
@@ -1520,6 +1521,15 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                     brief: "Yazi File Manager".into(),
                     doc: "Open Yazi file manager".into(),
                     keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "y".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: None,
+                }
+            } else if name == "kaku-open-remote-files" {
+                CommandDef {
+                    brief: "Remote Files".into(),
+                    doc: "Open the current SSH domain in a local Yazi tab".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "r".into())],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,
@@ -2467,6 +2477,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         EmitEvent("run-kaku-ai-config".to_string()),
         EmitEvent("kaku-launch-lazygit".to_string()),
         EmitEvent("kaku-launch-yazi".to_string()),
+        EmitEvent("kaku-open-remote-files".to_string()),
         SplitVertical(SpawnCommand {
             domain: SpawnTabDomain::CurrentPaneDomain,
             ..Default::default()
