@@ -13,6 +13,7 @@ pub mod debug;
 pub mod launcher;
 pub mod prompt;
 pub mod quickselect;
+pub mod rename_tab;
 pub mod selector;
 
 #[cfg(not(target_os = "macos"))]

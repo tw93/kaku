@@ -51,6 +51,9 @@ impl super::TermWindow {
     fn finish_mouse_release(&mut self, press: MousePress) {
         self.current_mouse_capture = None;
         self.current_mouse_buttons.retain(|p| p != &press);
+        if press == MousePress::Left {
+            self.tab_bar_drag_start.take();
+        }
     }
 
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -696,6 +699,7 @@ impl super::TermWindow {
         match event.kind {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, active } => {
+                    self.tab_bar_drag_start = Some(tab_idx);
                     if !active {
                         if let Err(err) = self.activate_tab(tab_idx as isize) {
                             log::debug!("activate_tab({tab_idx}) failed: {err:#}");
@@ -762,8 +766,8 @@ impl super::TermWindow {
                 | TabBarItem::WindowButton(_) => {}
             },
             WMEK::Press(MousePress::Right) => match item {
-                TabBarItem::Tab { .. } => {
-                    self.show_tab_navigator();
+                TabBarItem::Tab { tab_idx, .. } => {
+                    self.show_tab_context_menu(tab_idx);
                 }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Right);
@@ -773,6 +777,22 @@ impl super::TermWindow {
                 | TabBarItem::RightStatus
                 | TabBarItem::WindowButton(_) => {}
             },
+            WMEK::Release(MousePress::Left) => {
+                if let Some(from_idx) = self.tab_bar_drag_start.take() {
+                    if let TabBarItem::Tab { tab_idx, .. } = item {
+                        if from_idx != tab_idx {
+                            // Activate the source tab first so move_tab operates on it
+                            if let Err(err) = self.activate_tab(from_idx as isize) {
+                                log::debug!("activate_tab({from_idx}) for drag failed: {err:#}");
+                            } else if let Err(err) = self.move_tab(tab_idx) {
+                                log::debug!(
+                                    "move_tab from {from_idx} to {tab_idx} failed: {err:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             WMEK::Move => match item {
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
                     context.set_window_drag_position(event.screen_coords);
@@ -788,8 +808,13 @@ impl super::TermWindow {
                     context.set_maximize_button_position(bounds);
                 }
                 TabBarItem::WindowButton(_)
-                | TabBarItem::Tab { .. }
                 | TabBarItem::NewTabButton { .. } => {}
+                TabBarItem::Tab { .. } => {
+                    if self.tab_bar_drag_start.is_some() {
+                        context.set_cursor(Some(MouseCursor::Hand));
+                        return;
+                    }
+                }
             },
             WMEK::VertWheel(n) => {
                 if self.config.mouse_wheel_scrolls_tabs {

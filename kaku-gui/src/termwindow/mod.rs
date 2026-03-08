@@ -687,6 +687,8 @@ pub struct TermWindow {
     last_mouse_coords: (usize, i64),
     window_drag_position: Option<MouseEvent>,
     is_window_dragging: bool,
+    /// Tracks the tab index where a tab-bar drag started, for drag-to-reorder.
+    tab_bar_drag_start: Option<usize>,
     current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
     last_scroll_info: RenderableDimensions,
@@ -1106,6 +1108,7 @@ impl TermWindow {
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             is_window_dragging: false,
+            tab_bar_drag_start: None,
             current_mouse_event: None,
             current_modifier_and_leds: Default::default(),
             prev_cursor: PrevCursorPos::new(),
@@ -2946,6 +2949,34 @@ impl TermWindow {
             alphabet: None,
         };
         self.show_launcher_impl(args, active_tab_idx);
+    }
+
+    fn show_tab_context_menu(&mut self, tab_idx: usize) {
+        let mux = Mux::get();
+        let tab = {
+            let window = match mux.get_window(self.mux_window_id) {
+                Some(w) => w,
+                None => return,
+            };
+            match window.get_by_idx(tab_idx) {
+                Some(tab) => Arc::clone(tab),
+                None => return,
+            }
+        };
+
+        let active_tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        let tab_id = tab.tab_id();
+        let current_title = tab.get_title();
+
+        let (overlay, future) = start_overlay(self, &active_tab, move |_tab_id, term| {
+            crate::overlay::rename_tab::show_rename_tab_overlay(term, tab_id, current_title)
+        });
+        self.assign_overlay(active_tab.tab_id(), overlay);
+        promise::spawn::spawn(future).detach();
     }
 
     fn show_launcher(&mut self) {
