@@ -3165,6 +3165,23 @@ impl TermWindow {
         self.move_tab(tab)
     }
 
+    fn show_rename_tab_prompt(&mut self) {
+        let mux = Mux::get();
+        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        let tab_id = tab.tab_id();
+        let current_title = tab.get_title();
+
+        let (overlay, future) = start_overlay(self, &tab, move |_tab_id, term| {
+            crate::overlay::rename_tab::show_rename_tab_overlay(term, tab_id, current_title)
+        });
+        self.assign_overlay(tab.tab_id(), overlay);
+        promise::spawn::spawn(future).detach();
+    }
+
     pub fn perform_key_assignment(
         &mut self,
         pane: &Arc<dyn Pane>,
@@ -3364,6 +3381,7 @@ impl TermWindow {
             ReloadConfiguration => {}
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
+            RenameTab => self.show_rename_tab_prompt(),
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,
             ScrollByLine(n) => self.scroll_by_line(*n, pane)?,
             ScrollByCurrentEventWheelDelta => self.scroll_by_current_event_wheel_delta(pane)?,

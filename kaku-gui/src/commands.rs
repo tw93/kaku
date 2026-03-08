@@ -243,6 +243,7 @@ impl CommandDef {
             ActivateTabRelative(-1),
             ActivateTabRelative(1),
             ActivateLastTab,
+            RenameTab,
             MoveTabRelative(-1),
             MoveTabRelative(1),
             TogglePaneZoomState,
@@ -359,6 +360,7 @@ impl CommandDef {
                     | ActivateTabRelative(_)
                     | ActivateLastTab
                     | MoveTabRelative(_)
+                    | RenameTab
                     | TogglePaneZoomState
                     | AdjustPaneSize(_, _)
                     | ActivatePaneDirection(_)
@@ -746,6 +748,7 @@ impl CommandDef {
                     ShowTabNavigator => 33,
                     MoveTabRelative(-1) => 40,
                     MoveTabRelative(1) => 41,
+                    RenameTab => 42,
                     PaneSelect(PaneSelectArguments {
                         mode: PaneSelectMode::Activate,
                         ..
@@ -1748,6 +1751,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Kaku"],
             icon: None,
         },
+        RenameTab => CommandDef {
+            brief: "Rename Tab".into(),
+            doc: "Rename the current tab".into(),
+            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "r".into())],
+            args: &[ArgType::ActiveTab],
+            menubar: &["Window"],
+            icon: None,
+        },
         MoveTabRelative(-1) => CommandDef {
             brief: "Move Tab Left".into(),
             doc: "Move current tab left".into(),
@@ -2548,6 +2559,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ActivateTabRelative(1),
         ActivateWindowRelative(-1),
         ActivateWindowRelative(1),
+        RenameTab,
         MoveTabRelative(-1),
         MoveTabRelative(1),
         AdjustPaneSize(PaneDirection::Left, 5),
