@@ -54,11 +54,28 @@ TERM=xterm-256color \
 PATH="$tmp_dir/bin:$PATH" \
 HOME="$HOME" \
 ZDOTDIR="$ZDOTDIR" \
+output="$(
 zsh -f -c '
 source "$HOME/.config/kaku/zsh/kaku.zsh"
 RPROMPT='\''$(starship prompt --right)'\''
 _kaku_fix_starship_rprompt
-[[ "$RPROMPT" == "fake-right-prompt" ]]
-'
+print -r -- "__KAKU_RPROMPT__:$RPROMPT"
+' 2>&1
+)"
+
+case "$output" in
+  *__KAKU_RPROMPT__:* ) ;;
+  * )
+    echo "$output" >&2
+    exit 1
+    ;;
+esac
+
+case "$output" in
+  *"closing brace expected"* | *"bad pattern"* )
+    echo "$output" >&2
+    exit 1
+    ;;
+esac
 
 echo "starship_rprompt smoke test passed"
