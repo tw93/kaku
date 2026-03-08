@@ -9,7 +9,6 @@ use cocoa::foundation::NSInteger;
 use config::keyassignment::KeyAssignment;
 use config::WindowCloseConfirmation;
 use objc::declare::ClassDecl;
-use objc::rc::StrongPtr;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::*;
 
@@ -182,12 +181,17 @@ fn get_class() -> &'static Class {
     })
 }
 
-pub fn create_app_delegate() -> StrongPtr {
+/// Creates the application delegate as a process-lifetime singleton.
+/// The returned pointer is intentionally never released — NSApplication's
+/// `setDelegate:` is `assign` (non-retaining), so the delegate must outlive
+/// the application. Leaking a single small object for the entire process
+/// lifetime is the correct ownership model here.
+pub fn create_app_delegate() -> id {
     let cls = get_class();
     unsafe {
-        let delegate: *mut Object = msg_send![cls, alloc];
-        let delegate: *mut Object = msg_send![delegate, init];
+        let delegate: id = msg_send![cls, alloc];
+        let delegate: id = msg_send![delegate, init];
         (*delegate).set_ivar("launched", NO);
-        StrongPtr::new(delegate)
+        delegate
     }
 }
