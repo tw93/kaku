@@ -194,6 +194,10 @@ pub struct Config {
     /// by the colors setting.
     pub color_scheme: Option<String>,
 
+    /// UI language: "en" for English (default), "zh" for Chinese.
+    #[dynamic(default)]
+    pub language: Option<String>,
+
     /// Named color schemes
     #[dynamic(default)]
     pub color_schemes: HashMap<String, Palette>,

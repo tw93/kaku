@@ -30,6 +30,7 @@ mod daemon;
 mod exec_domain;
 mod font;
 mod frontend;
+pub mod i18n;
 pub mod keyassignment;
 mod keys;
 pub mod lua;
@@ -1119,6 +1120,9 @@ impl ConfigInner {
 
         match config {
             Ok(config) => {
+                if let Some(ref lang) = config.language {
+                    i18n::set_language(i18n::Language::from_str(lang));
+                }
                 self.config = Arc::new(config);
                 self.error.take();
                 self.generation += 1;
@@ -1198,6 +1202,9 @@ impl ConfigInner {
     }
 
     fn use_this_config(&mut self, cfg: Config) {
+        if let Some(ref lang) = cfg.language {
+            i18n::set_language(i18n::Language::from_str(lang));
+        }
         self.config = Arc::new(cfg);
         self.error.take();
         self.generation += 1;

@@ -35,6 +35,7 @@ termwiz-funcs.workspace = true
 termwiz.workspace = true
 toml.workspace = true
 umask.workspace = true
+unicode-width.workspace = true
 url.workspace = true
 wezterm-client.workspace = true
 wezterm-gui-subcommands.workspace = true
