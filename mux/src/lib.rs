@@ -44,6 +44,7 @@ pub mod localpane;
 pub mod pane;
 pub mod pane_encoding;
 pub mod renderable;
+pub mod session;
 pub mod ssh;
 pub mod ssh_agent;
 pub mod tab;

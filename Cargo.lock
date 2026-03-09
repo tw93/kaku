@@ -3084,6 +3084,7 @@ dependencies = [
  "promise",
  "rangeset",
  "serde",
+ "serde_json",
  "shell-words",
  "smol",
  "terminfo",

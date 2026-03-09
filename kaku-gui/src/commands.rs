@@ -2379,6 +2379,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                 icon: None,
             }
         }
+        SaveSession => CommandDef {
+            brief: "Save Session".into(),
+            doc: "Save current session with AI-analyzed commands".into(),
+            keys: vec![(Modifiers::SUPER, "s".into())],
+            args: &[],
+            menubar: &["File"],
+            icon: None,
+        },
         ActivateKeyTable { name, .. } => CommandDef {
             brief: format!("Activate key table `{name}`").into(),
             doc: format!("Activate key table `{name}`").into(),
@@ -2489,6 +2497,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         CloseCurrentTab { confirm: true },
         CloseCurrentPane { confirm: true },
         ReopenLastClosedTab,
+        SaveSession,
         DetachDomain(SpawnTabDomain::CurrentPaneDomain),
         ResetTerminal,
         // ----------------- Edit

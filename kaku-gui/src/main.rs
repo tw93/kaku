@@ -152,6 +152,26 @@ async fn spawn_tab_in_domain_if_mux_is_empty(
     let domain = domain.unwrap_or_else(|| mux.default_domain());
 
     if !is_connecting {
+        log::info!("Checking for existing panes and session restore");
+
+        // Try to restore session first
+        let session_path = config::HOME_DIR
+            .join(".config")
+            .join("kaku")
+            .join("session.json");
+
+        if let Ok(Some(snapshot)) = mux::session::SessionSnapshot::load_from_file(&session_path) {
+            log::info!("Session file found, attempting restore");
+            if snapshot.restore().await.is_ok() {
+                log::info!("Session restored from {:?}", session_path);
+                return Ok(());
+            } else {
+                log::error!("Session restore failed");
+            }
+        } else {
+            log::info!("No session file found or failed to load");
+        }
+
         if have_panes_in_domain_and_ws(&domain, &workspace) {
             return Ok(());
         }

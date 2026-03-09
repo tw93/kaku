@@ -734,6 +734,7 @@ pub enum KeyAssignment {
         spawn: Option<SpawnCommand>,
     },
     SwitchWorkspaceRelative(isize),
+    SaveSession,
 
     ActivateKeyTable {
         name: String,

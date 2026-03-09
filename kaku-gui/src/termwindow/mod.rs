@@ -3694,6 +3694,28 @@ impl TermWindow {
                     front_end().switch_workspace(w);
                 }
             }
+            SaveSession => {
+                let session_path = config::HOME_DIR
+                    .join(".config")
+                    .join("kaku")
+                    .join("session.json");
+
+                match mux::session::SessionSnapshot::capture() {
+                    Ok(snapshot) => {
+                        if let Err(e) = mux::session::SessionSnapshot::save_to_file(&session_path, &snapshot) {
+                            log::error!("Failed to save session: {:#}", e);
+                            self.show_toast(format!("Failed to save session: {}", e));
+                        } else {
+                            log::info!("Session saved to {:?}", session_path);
+                            self.show_toast("Session saved successfully".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to capture session: {:#}", e);
+                        self.show_toast(format!("Failed to capture session: {}", e));
+                    }
+                }
+            }
             SwitchToWorkspace { name, spawn } => {
                 let activity = crate::Activity::new();
                 let mux = Mux::get();
