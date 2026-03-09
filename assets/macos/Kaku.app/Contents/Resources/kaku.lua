@@ -2848,12 +2848,11 @@ wezterm.on('update-right-status', function(window, pane)
 end)
 
 -- ===== Font =====
--- Use slightly heavier font weight for light theme to improve readability.
--- Light theme: Medium base, DemiBold for bold.
--- Dark theme: Regular base, Medium for bold.
-local function build_font_config(is_light)
-  local base_weight = is_light and 'Medium' or 'Regular'
-  local bold_weight = is_light and 'DemiBold' or 'Medium'
+local function build_font_config()
+  -- Keep the same font metrics across themes so visual padding stays stable
+  -- when switching between light and dark.
+  local base_weight = 'Regular'
+  local bold_weight = 'Medium'
 
   local font = wezterm.font_with_fallback({
     { family = 'JetBrains Mono', weight = base_weight },
@@ -2892,50 +2891,10 @@ local function build_font_config(is_light)
   return font, font_rules
 end
 
--- Check user config to determine initial theme for font weight
-local function is_user_light_theme()
-  local user_config_path = kaku_user_config_path()
-  if not user_config_path then
-    return false
-  end
-  local file = io.open(user_config_path, 'r')
-  if not file then
-    return false
-  end
-  for line in file:lines() do
-    local trimmed = line:match('^%s*(.-)%s*$')
-    if trimmed and not trimmed:match('^%-%-') then
-      if trimmed:match("^config%.color_scheme%s*=%s*['\"]Kaku Light['\"]") then
-        file:close()
-        return true
-      end
-    end
-  end
-  file:close()
-  return false
-end
+config.font, config.font_rules = build_font_config()
 
--- Set initial font config based on user's theme setting
-config.font, config.font_rules = build_font_config(is_user_light_theme())
-
--- Track last font theme per window to avoid redundant overrides
-local window_font_theme = setmetatable({}, { __mode = 'k' })
-
--- Dynamically switch font weight when theme changes
+-- Refresh per-window layout after config reloads.
 wezterm.on('window-config-reloaded', function(window, pane)
-  local overrides = window:get_config_overrides() or {}
-  local scheme = overrides.color_scheme or config.color_scheme or 'Kaku Dark'
-  local is_light = scheme == 'Kaku Light'
-
-  if window_font_theme[window] ~= is_light then
-    window_font_theme[window] = is_light
-
-    local font, font_rules = build_font_config(is_light)
-    overrides.font = font
-    overrides.font_rules = font_rules
-    window:set_config_overrides(overrides)
-  end
-
   local dims = window:get_dimensions()
   update_window_config(window, dims.is_full_screen, pane)
 end)

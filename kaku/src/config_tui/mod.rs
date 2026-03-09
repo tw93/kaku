@@ -762,17 +762,7 @@ impl App {
             if field.skip_write {
                 continue;
             }
-            let is_default = field.value.is_empty() || field.value == field.default;
-            // Keep tab bar position explicit so switching back to Bottom
-            // does not depend on removing a line and inheriting bundled defaults.
-            let always_write = field.lua_key == "tab_bar_at_bottom";
-            if is_default && !always_write {
-                // Remove the config line if it exists
-                content = self.remove_lua_config(&content, field.lua_key);
-            } else {
-                // Update or add the config line
-                content = self.update_lua_config(&content, field);
-            }
+            content = self.apply_field_to_content(&content, field);
         }
 
         // Atomic write: write to a temp file then rename so the file watcher
@@ -811,6 +801,23 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn apply_field_to_content(&self, content: &str, field: &ConfigField) -> String {
+        let is_default = field.value.is_empty() || field.value == field.default;
+        if is_default && !Self::always_write_field(field.lua_key) {
+            // Remove the config line if it exists
+            self.remove_lua_config(content, field.lua_key)
+        } else {
+            // Update or add the config line
+            self.update_lua_config(content, field)
+        }
+    }
+
+    fn always_write_field(lua_key: &str) -> bool {
+        // Keep theme and tab bar position explicit so switching back to the
+        // bundled defaults does not rely on downstream fallback behavior.
+        matches!(lua_key, "color_scheme" | "tab_bar_at_bottom")
     }
 
     fn remove_lua_config(&self, content: &str, lua_key: &str) -> String {
@@ -1078,6 +1085,25 @@ mod tests {
         app.fields[idx].value = "Top".to_string();
 
         assert_eq!(app.to_lua_value(&app.fields[idx]), "false");
+    }
+
+    #[test]
+    fn switching_theme_back_to_dark_keeps_explicit_color_scheme_line() {
+        let mut app = App::new();
+        let idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "color_scheme")
+            .expect("color_scheme field to exist");
+        app.fields[idx].value = "Kaku Dark".to_string();
+
+        let updated = app.apply_field_to_content(
+            "local wezterm = require 'wezterm'\nconfig.color_scheme = 'Kaku Light'\nreturn config\n",
+            &app.fields[idx],
+        );
+
+        assert!(updated.contains("config.color_scheme = 'Kaku Dark'"));
+        assert!(!updated.contains("config.color_scheme = 'Kaku Light'"));
     }
 
     #[test]
