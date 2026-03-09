@@ -3,6 +3,7 @@ mod ui;
 use crate::assistant_config;
 use crate::utils::open_path_in_editor;
 use anyhow::Context;
+use config::i18n::{self, Language};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -276,6 +277,14 @@ impl App {
                 options: vec!["On", "Off"],
                 skip_write: false,
             },
+            ConfigField {
+                key: "Language",
+                lua_key: "language",
+                value: String::new(),
+                default: "English".into(),
+                options: vec!["English", "中文"],
+                skip_write: false,
+            },
         ];
 
         Self {
@@ -332,6 +341,21 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Sync i18n language so the TUI itself renders in the chosen language.
+        if let Some(field) = self.fields.iter().find(|f| f.lua_key == "language") {
+            let display = if field.value.is_empty() {
+                &field.default
+            } else {
+                &field.value
+            };
+            let lang = if display == "中文" {
+                Language::Zh
+            } else {
+                Language::En
+            };
+            i18n::set_language(lang);
         }
     }
 
@@ -555,6 +579,13 @@ impl App {
                     None
                 }
             }
+            "language" => {
+                let value = raw.trim().trim_matches('\'').trim_matches('"');
+                match value.to_lowercase().as_str() {
+                    "zh" | "chinese" | "中文" => Some("中文".into()),
+                    _ => Some("English".into()),
+                }
+            }
             "macos_global_hotkey" => {
                 let value = raw.trim();
                 if value.eq_ignore_ascii_case("nil") {
@@ -627,6 +658,7 @@ impl App {
                 self.fields[self.selected].value = next_value;
                 self.fields[self.selected].skip_write = false;
                 self.dirty = true;
+                self.sync_language_if_changed();
             } else {
                 self.mode = Mode::Selecting;
                 let current = self.display_value(field);
@@ -700,6 +732,23 @@ impl App {
         self.fields[self.selected].skip_write = false;
         self.mode = Mode::Normal;
         self.dirty = true;
+        self.sync_language_if_changed();
+    }
+
+    fn sync_language_if_changed(&self) {
+        if let Some(field) = self.fields.iter().find(|f| f.lua_key == "language") {
+            let display = if field.value.is_empty() {
+                &field.default
+            } else {
+                &field.value
+            };
+            let lang = if display == "中文" {
+                Language::Zh
+            } else {
+                Language::En
+            };
+            i18n::set_language(lang);
+        }
     }
 
     fn edit_backspace(&mut self) {
@@ -817,7 +866,7 @@ impl App {
     fn always_write_field(lua_key: &str) -> bool {
         // Keep theme and tab bar position explicit so switching back to the
         // bundled defaults does not rely on downstream fallback behavior.
-        matches!(lua_key, "color_scheme" | "tab_bar_at_bottom")
+        matches!(lua_key, "color_scheme" | "tab_bar_at_bottom" | "language")
     }
 
     fn remove_lua_config(&self, content: &str, lua_key: &str) -> String {
@@ -1010,6 +1059,13 @@ impl App {
                 } else {
                     // confirm_edit() already validated; nil is a defensive fallback.
                     Self::hotkey_to_lua(&field.value).unwrap_or_else(|| "nil".into())
+                }
+            }
+            "language" => {
+                if field.value == "中文" {
+                    "'zh'".into()
+                } else {
+                    "'en'".into()
                 }
             }
             _ => format!("'{}'", field.value),

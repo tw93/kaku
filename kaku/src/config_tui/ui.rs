@@ -2,9 +2,11 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use super::{App, Mode};
 use crate::tui_core::theme::{accent, bg, muted, panel, primary, text_fg};
+use config::i18n::{t, t_display};
 
 pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let full = frame.area();
@@ -40,7 +42,7 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(primary()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" · ", Style::default().fg(muted())),
-        Span::styled("Settings", Style::default().fg(text_fg())),
+        Span::styled(t("Settings").into_owned(), Style::default().fg(text_fg())),
     ]);
     frame.render_widget(Paragraph::new(vec![line, Line::from("")]), area);
 }
@@ -58,8 +60,14 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             selected_flat = Some(flat);
         }
 
-        let display_value = app.display_value(field);
+        let display_value = t_display(app.display_value(field));
         let has_options = field.has_options();
+        let translated_key = t_display(field.key);
+        let padded_key = {
+            let w = UnicodeWidthStr::width(translated_key.as_str());
+            let pad = key_width.saturating_sub(w);
+            format!("{}{}", translated_key, " ".repeat(pad))
+        };
 
         let key_style = if is_selected {
             Style::default().fg(primary()).add_modifier(Modifier::BOLD)
@@ -95,7 +103,7 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     }),
             ),
             Span::styled(
-                format!("{:<width$}", field.key, width = key_width),
+                padded_key,
                 key_style,
             ),
             Span::styled(format!("{}{}", display_value, suffix), value_style),
@@ -109,10 +117,16 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     items.push(ListItem::new(Line::from(vec![
         Span::styled("    ", Style::default()),
         Span::styled("ESC", Style::default().fg(primary())),
-        Span::styled(" save and apply changes", Style::default().fg(muted())),
+        Span::styled(
+            format!(" {}", t("save and apply changes")),
+            Style::default().fg(muted()),
+        ),
         Span::styled("  ·  ", Style::default().fg(muted())),
         Span::styled("E", Style::default().fg(primary())),
-        Span::styled(" open full config", Style::default().fg(muted())),
+        Span::styled(
+            format!(" {}", t("open full config")),
+            Style::default().fg(muted()),
+        ),
     ])));
 
     let mut state = ListState::default();
@@ -152,8 +166,11 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" Select: ", Style::default().fg(primary())),
-            Span::styled(field.key, Style::default().fg(text_fg())),
+            Span::styled(
+                t(" Select: ").into_owned(),
+                Style::default().fg(primary()),
+            ),
+            Span::styled(t_display(field.key), Style::default().fg(text_fg())),
             Span::raw(" "),
         ]))
         .borders(Borders::ALL)
@@ -170,6 +187,7 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .map(|(i, opt)| {
             let is_sel = i == select_index;
             let marker = if is_sel { "› " } else { "  " };
+            let translated_opt = t_display(opt);
             let style = if is_sel {
                 Style::default().fg(primary()).add_modifier(Modifier::BOLD)
             } else {
@@ -186,7 +204,7 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                             Modifier::empty()
                         }),
                 ),
-                Span::styled(*opt, style),
+                Span::styled(translated_opt, style),
             ]))
         })
         .collect();
@@ -216,13 +234,22 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" Edit: ", Style::default().fg(primary())),
-            Span::styled(field.key, Style::default().fg(text_fg())),
+            Span::styled(
+                t(" Edit: ").into_owned(),
+                Style::default().fg(primary()),
+            ),
+            Span::styled(t_display(field.key), Style::default().fg(text_fg())),
             Span::styled("  ", Style::default()),
             Span::styled("Enter", Style::default().fg(primary())),
-            Span::styled(": Save  ", Style::default().fg(muted())),
+            Span::styled(
+                t(": Save  ").into_owned(),
+                Style::default().fg(muted()),
+            ),
             Span::styled("Esc", Style::default().fg(primary())),
-            Span::styled(": Cancel ", Style::default().fg(muted())),
+            Span::styled(
+                t(": Cancel ").into_owned(),
+                Style::default().fg(muted()),
+            ),
         ]))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(primary()))

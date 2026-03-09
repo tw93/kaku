@@ -11,6 +11,7 @@ use crate::overlay::quickselect;
 use crate::overlay::selector::{matcher_pattern, matcher_score};
 use crate::termwindow::TermWindowNotif;
 use config::configuration;
+use config::i18n::{t, t_display};
 use config::keyassignment::KeyAssignment::SetPaneEncoding;
 use config::keyassignment::{
     KeyAssignment, LauncherActionArgs, PaneEncoding, SpawnCommand, SpawnTabDomain,
@@ -140,9 +141,9 @@ impl LauncherArgs {
                 let name = dom.domain_name();
                 let label = dom.domain_label().await;
                 let label = if name == label || label.is_empty() {
-                    format!("domain `{}`", name)
+                    format!("{} `{}`", t("domain"), name)
                 } else {
-                    format!("domain `{}` - {}", name, label)
+                    format!("{} `{}` - {}", t("domain"), name, label)
                 };
                 d.push(LauncherDomainEntry {
                     domain_id: dom.domain_id(),
@@ -246,10 +247,10 @@ impl LauncherState {
         // Only when NOT already viewing the encoding submenu
         if !args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
             self.entries.push(Entry {
-                label: "Pane Encoding".to_string(),
+                label: t_display("Pane Encoding"),
                 action: KeyAssignment::ShowLauncherArgs(LauncherActionArgs {
                     flags: LauncherFlags::PANE_ENCODINGS,
-                    title: Some("Pane Encoding".to_string()),
+                    title: Some(t_display("Pane Encoding")),
                     help_text: None,
                     fuzzy_help_text: None,
                     alphabet: None,
@@ -266,7 +267,7 @@ impl LauncherState {
                         Some(label) => label.to_string(),
                         None => match item.args.as_ref() {
                             Some(args) => args.join(" "),
-                            None => "(default shell)".to_string(),
+                            None => t_display("(default shell)"),
                         },
                     },
                     action: KeyAssignment::SpawnCommandInNewTab(item.clone()),
@@ -277,7 +278,7 @@ impl LauncherState {
         for domain in &args.domains {
             let entry = if domain.state == DomainState::Attached {
                 Entry {
-                    label: format!("New Tab ({})", domain.label),
+                    label: format!("{} ({})", t("New Tab"), domain.label),
                     action: KeyAssignment::SpawnCommandInNewTab(SpawnCommand {
                         domain: SpawnTabDomain::DomainName(domain.name.to_string()),
                         ..SpawnCommand::default()
@@ -285,7 +286,7 @@ impl LauncherState {
                 }
             } else {
                 Entry {
-                    label: format!("Attach {}", domain.label),
+                    label: format!("{} {}", t("Attach"), domain.label),
                     action: KeyAssignment::AttachDomain(domain.name.to_string()),
                 }
             };
@@ -303,7 +304,7 @@ impl LauncherState {
             for ws in &args.workspaces {
                 if *ws != args.active_workspace {
                     self.entries.push(Entry {
-                        label: format!("Switch to workspace: `{}`", ws),
+                        label: format!("{}: `{}`", t("Switch to workspace"), ws),
                         action: KeyAssignment::SwitchToWorkspace {
                             name: Some(ws.clone()),
                             spawn: None,
@@ -313,7 +314,9 @@ impl LauncherState {
             }
             self.entries.push(Entry {
                 label: format!(
-                    "Create new Workspace (current is `{}`)",
+                    "{} ({}: `{}`)",
+                    t("Create new Workspace"),
+                    t("current is"),
                     args.active_workspace
                 ),
                 action: KeyAssignment::SwitchToWorkspace {
@@ -326,7 +329,7 @@ impl LauncherState {
         for tab in &args.tabs {
             self.entries.push(Entry {
                 label: match tab.pane_count {
-                    Some(pane_count) => format!("{}. {pane_count} panes", tab.title),
+                    Some(pane_count) => format!("{}. {pane_count} {}", tab.title, t("panes")),
                     None => format!("{}.", tab.title),
                 },
                 action: KeyAssignment::ActivateTab(tab.tab_idx as isize),
@@ -336,7 +339,7 @@ impl LauncherState {
         if args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
             for encoding in PaneEncoding::ordered_list() {
                 self.entries.push(Entry {
-                    label: format!("Set pane encoding to {encoding}"),
+                    label: format!("{} {encoding}", t("Set pane encoding to")),
                     action: SetPaneEncoding(encoding),
                 });
             }
@@ -585,12 +588,12 @@ impl LauncherState {
         self.entries.clear();
         for encoding in PaneEncoding::ordered_list() {
             self.entries.push(Entry {
-                label: format!("Set pane encoding to {encoding}"),
+                label: format!("{} {encoding}", t("Set pane encoding to")),
                 action: SetPaneEncoding(encoding),
             });
         }
         self.help_text =
-            "Select encoding  |  Enter = set  |  Esc = back  |  / = filter".to_string();
+            t("Select encoding  |  Enter = set  |  Esc = back  |  / = filter").into_owned();
         self.active_idx = 0;
         self.top_row = 0;
         self.filtering = false;
