@@ -1,14 +1,14 @@
 use crate::domain::DomainId;
 use crate::pane::{
-    CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, Pattern,
-    SearchResult, WithPaneLines,
+    CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId, PaneReader,
+    Pattern, SearchResult, WithPaneLines,
 };
 use crate::renderable::*;
 use crate::tmux::{TmuxDomain, TmuxDomainState};
 use crate::{Domain, Mux, MuxNotification};
 use anyhow::Error;
 use async_trait::async_trait;
-use config::keyassignment::ScrollbackEraseMode;
+use config::keyassignment::{PaneEncoding, ScrollbackEraseMode};
 use config::{configuration, ExitBehavior, ExitBehaviorMessaging};
 use fancy_regex::Regex;
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::{Result as IoResult, Write};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use termwiz::escape::csi::{Sgr, CSI};
@@ -132,6 +133,7 @@ pub struct LocalPane {
     proc_list: Mutex<Option<CachedProcInfo>>,
     #[cfg(unix)]
     leader: Arc<Mutex<Option<CachedLeaderInfo>>>,
+    encoding: Arc<AtomicU8>,
     command_description: String,
 }
 
@@ -177,6 +179,14 @@ impl Pane for LocalPane {
         } else {
             self.terminal.lock().get_keyboard_encoding()
         }
+    }
+
+    fn get_encoding(&self) -> PaneEncoding {
+        PaneEncoding::from_u8(self.encoding.load(Ordering::Relaxed))
+    }
+
+    fn set_encoding(&self, encoding: PaneEncoding) {
+        self.encoding.store(encoding.to_u8(), Ordering::Relaxed);
     }
 
     fn get_current_seqno(&self) -> SequenceNo {
@@ -425,6 +435,11 @@ impl Pane for LocalPane {
         Ok(())
     }
 
+    fn resize_visual(&self, size: TerminalSize) -> Result<(), Error> {
+        self.terminal.lock().resize(size);
+        Ok(())
+    }
+
     fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {
         Mux::get().record_input_for_current_identity();
         MutexGuard::map(self.writer.lock(), |writer| {
@@ -433,8 +448,16 @@ impl Pane for LocalPane {
         })
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
-        Ok(Some(self.pty.lock().try_clone_reader()?))
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
+        let pty = self.pty.lock();
+        let reader = pty.try_clone_reader()?;
+        #[cfg(unix)]
+        let fd = pty.as_raw_fd();
+        Ok(Some(PaneReader {
+            reader,
+            #[cfg(unix)]
+            fd,
+        }))
     }
 
     fn send_paste(&self, text: &str) -> Result<(), Error> {
@@ -507,6 +530,14 @@ impl Pane for LocalPane {
         } else {
             self.terminal.lock().is_alt_screen_active()
         }
+    }
+
+    fn is_primary_peek(&self) -> bool {
+        self.terminal.lock().is_primary_peek()
+    }
+
+    fn set_primary_peek(&self, peek: bool) {
+        self.terminal.lock().set_primary_peek(peek);
     }
 
     fn get_current_working_dir(&self, policy: CachePolicy) -> Option<Url> {
@@ -992,6 +1023,7 @@ impl LocalPane {
         pty: Box<dyn MasterPty>,
         writer: Box<dyn Write + Send>,
         domain_id: DomainId,
+        encoding: Arc<AtomicU8>,
         command_description: String,
     ) -> Self {
         let (process, signaller, pid) = split_child(process);
@@ -1018,6 +1050,7 @@ impl LocalPane {
             proc_list: Mutex::new(None),
             #[cfg(unix)]
             leader: Arc::new(Mutex::new(None)),
+            encoding,
             command_description,
         }
     }
@@ -1124,13 +1157,9 @@ impl LocalPane {
         None
     }
 
-    #[allow(dead_code)]
     fn divine_foreground_process(&self, policy: CachePolicy) -> Option<LocalProcessInfo> {
-        if let Some(info) = self.divine_process_list(policy) {
-            Some(info.foreground.clone())
-        } else {
-            None
-        }
+        self.divine_process_list(policy)
+            .map(|info| info.foreground.clone())
     }
 }
 

@@ -4,8 +4,10 @@ use super::utilsprites::RenderMetrics;
 use crate::colorease::ColorEase;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
+#[cfg(not(target_os = "macos"))]
+use crate::overlay::confirm_close_window;
 use crate::overlay::{
-    confirm_close_pane, confirm_close_tab, confirm_close_window, confirm_quit_program, launcher,
+    confirm_close_pane, confirm_close_tab, confirm_quit_program, launcher, show_debug_overlay,
     start_overlay, start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
     QuickSelectOverlay,
 };
@@ -30,8 +32,8 @@ use ::wezterm_term::input::{ClickPosition, MouseButton as TMB};
 use ::window::*;
 use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
-    Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, Pattern, PromptInputLine,
-    QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
+    Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
+    PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
 };
 use config::window::WindowLevel;
 use config::{
@@ -56,6 +58,7 @@ use smol::Timer;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, LinkedList};
 use std::ops::Add;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,6 +66,7 @@ use std::time::{Duration, Instant};
 use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::SequenceNo;
 use wezterm_dynamic::Value;
+use wezterm_font::units::PixelLength;
 use wezterm_font::FontConfiguration;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
@@ -82,15 +86,272 @@ pub mod render;
 pub mod resize;
 mod selection;
 pub mod spawn;
+pub mod tab_rename;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
 
 const ATLAS_SIZE: usize = 128;
+const VSCODE_OPEN_CANDIDATES: &[&str] = &[
+    "code",
+    "/usr/local/bin/code",
+    "/opt/homebrew/bin/code",
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+];
+
+#[derive(Clone, Debug)]
+struct FileLinkTarget {
+    path: PathBuf,
+    line: Option<usize>,
+    col: Option<usize>,
+}
+
+fn decode_hex_event_payload(payload: &str) -> Option<String> {
+    if payload.is_empty() || payload.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(payload.len() / 2);
+    let chars: Vec<char> = payload.chars().collect();
+    for i in (0..chars.len()).step_by(2) {
+        let hi = chars[i].to_digit(16)?;
+        let lo = chars[i + 1].to_digit(16)?;
+        bytes.push(((hi << 4) | lo) as u8);
+    }
+
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Check if a color is light based on luminance.
+/// Expects an SrgbaTuple (r, g, b, a) where r, g, b are in 0.0-1.0 range.
+pub fn is_light_color(color: &wezterm_term::color::SrgbaTuple) -> bool {
+    let luminance = 0.299 * color.0 + 0.587 * color.1 + 0.114 * color.2;
+    luminance > 0.5
+}
+
+fn ai_toast_lifetime_ms(message: &str) -> u64 {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("checking")
+        || lower.contains("analy")
+        || lower.contains("fail")
+        || lower.contains("error")
+        || lower.contains("missing")
+        || lower.contains("unavailable")
+        || lower.contains("not found")
+    {
+        3000
+    } else {
+        2000
+    }
+}
+
+/// Lookup table for simple lazygit/yazi toast messages dispatched via EmitEvent.
+fn lookup_kaku_toast(event_name: &str) -> Option<&'static str> {
+    const KAKU_TOAST_MAP: &[(&str, &str)] = &[
+        ("kaku-toast-try-lazygit", "Try Lazygit: Cmd+Shift+G"),
+        ("kaku-toast-lazygit-no-pane", "Lazygit: No active pane"),
+        (
+            "kaku-toast-lazygit-no-cwd",
+            "Lazygit: Cannot detect current directory",
+        ),
+        (
+            "kaku-toast-lazygit-not-git",
+            "Lazygit: Not a git repository",
+        ),
+        (
+            "kaku-toast-lazygit-missing",
+            "Lazygit not found. Run kaku init",
+        ),
+        (
+            "kaku-toast-lazygit-dispatch-failed",
+            "Lazygit: Dispatch failed",
+        ),
+        ("kaku-toast-yazi-no-pane", "Yazi: No active pane"),
+        ("kaku-toast-yazi-missing", "Yazi not found. Run kaku init"),
+        ("kaku-toast-yazi-dispatch-failed", "Yazi: Dispatch failed"),
+    ];
+    KAKU_TOAST_MAP
+        .iter()
+        .find(|(k, _)| *k == event_name)
+        .map(|(_, v)| *v)
+}
+
+/// Lookup table for AI result-notice toast messages dispatched via EmitEvent.
+fn lookup_ai_toast(event_name: &str) -> Option<&'static str> {
+    const AI_TOAST_MAP: &[(&str, &str)] = &[
+        (
+            "kaku-toast-ai-ready",
+            "Kaku Assistant suggestion ready. Press Cmd+Shift+E",
+        ),
+        ("kaku-toast-ai-unavailable", "Kaku Assistant unavailable"),
+        (
+            "kaku-toast-ai-missing-key",
+            "Run kaku ai to set up Kaku Assistant.",
+        ),
+        ("kaku-toast-ai-no-pane", "No active pane"),
+        ("kaku-toast-ai-no-suggestion", "No executable suggestion"),
+        ("kaku-toast-ai-send-failed", "Failed to apply suggestion"),
+        ("kaku-toast-ai-info", "Kaku Assistant update"),
+    ];
+    AI_TOAST_MAP
+        .iter()
+        .find(|(k, _)| *k == event_name)
+        .map(|(_, v)| *v)
+}
 
 lazy_static::lazy_static! {
     static ref WINDOW_CLASS: Mutex<String> = Mutex::new(wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS.to_owned());
     static ref POSITION: Mutex<Option<GuiPosition>> = Mutex::new(None);
+    static ref RENDER_METRICS_CACHE: Mutex<Option<RenderMetricsCacheEntry>> = Mutex::new(None);
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RenderMetricsCacheKey {
+    dpi: usize,
+    persisted_font_scale_bits: u64,
+    font_size_bits: u64,
+    line_height_bits: u64,
+    cell_width_bits: u64,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct RenderMetricsCacheEntry {
+    key: RenderMetricsCacheKey,
+    metrics: RenderMetrics,
+}
+
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RenderMetricsDiskEntry {
+    key: RenderMetricsCacheKey,
+    descender: f64,
+    descender_row: isize,
+    descender_plus_two: isize,
+    underline_height: isize,
+    strike_row: isize,
+    cell_width: isize,
+    cell_height: isize,
+}
+
+fn render_metrics_cache_file() -> PathBuf {
+    config::DATA_DIR.join("render_metrics_cache_v1.json")
+}
+
+fn load_render_metrics_from_disk(key: RenderMetricsCacheKey) -> Option<RenderMetrics> {
+    let file_name = render_metrics_cache_file();
+    let data = match std::fs::read(&file_name) {
+        Ok(data) => data,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                log::debug!(
+                    "Failed to read render metrics cache {}: {}",
+                    file_name.display(),
+                    err
+                );
+            }
+            return None;
+        }
+    };
+    let entry: RenderMetricsDiskEntry = match serde_json::from_slice(&data) {
+        Ok(entry) => entry,
+        Err(err) => {
+            log::debug!(
+                "Failed to parse render metrics cache {}: {}",
+                file_name.display(),
+                err
+            );
+            return None;
+        }
+    };
+    if entry.key != key {
+        return None;
+    }
+
+    if !entry.descender.is_finite()
+        || entry.cell_width <= 0
+        || entry.cell_height <= 0
+        || entry.underline_height <= 0
+    {
+        return None;
+    }
+
+    Some(RenderMetrics {
+        descender: PixelLength::new(entry.descender),
+        descender_row: entry.descender_row,
+        descender_plus_two: entry.descender_plus_two,
+        underline_height: entry.underline_height,
+        strike_row: entry.strike_row,
+        cell_size: Size::new(entry.cell_width, entry.cell_height),
+    })
+}
+
+fn persist_render_metrics_to_disk(key: RenderMetricsCacheKey, metrics: RenderMetrics) {
+    let file_name = render_metrics_cache_file();
+    if let Some(parent) = file_name.parent() {
+        if let Err(err) = config::create_user_owned_dirs(parent) {
+            log::debug!(
+                "Failed to create render metrics cache directory {}: {:#}",
+                parent.display(),
+                err
+            );
+        }
+    }
+
+    let entry = RenderMetricsDiskEntry {
+        key,
+        descender: metrics.descender.get(),
+        descender_row: metrics.descender_row,
+        descender_plus_two: metrics.descender_plus_two,
+        underline_height: metrics.underline_height,
+        strike_row: metrics.strike_row,
+        cell_width: metrics.cell_size.width,
+        cell_height: metrics.cell_size.height,
+    };
+
+    match serde_json::to_vec(&entry) {
+        Ok(data) => {
+            if let Err(err) = std::fs::write(&file_name, data) {
+                log::debug!(
+                    "Failed to write render metrics cache {}: {}",
+                    file_name.display(),
+                    err
+                );
+            }
+        }
+        Err(err) => {
+            log::debug!("Failed to serialize render metrics cache entry: {}", err);
+        }
+    }
+}
+
+fn render_metrics_from_cache_or_compute(
+    fonts: &Rc<FontConfiguration>,
+    config: &ConfigHandle,
+    dpi: usize,
+    persisted_font_scale: Option<f64>,
+) -> anyhow::Result<(RenderMetrics, bool)> {
+    let key = RenderMetricsCacheKey {
+        dpi,
+        persisted_font_scale_bits: persisted_font_scale.unwrap_or(1.0).to_bits(),
+        font_size_bits: config.font_size.to_bits(),
+        line_height_bits: config.line_height.to_bits(),
+        cell_width_bits: config.cell_width.to_bits(),
+    };
+
+    if let Some(entry) = *RENDER_METRICS_CACHE.lock().unwrap() {
+        if entry.key == key {
+            return Ok((entry.metrics, true));
+        }
+    }
+
+    if let Some(metrics) = load_render_metrics_from_disk(key) {
+        *RENDER_METRICS_CACHE.lock().unwrap() = Some(RenderMetricsCacheEntry { key, metrics });
+        return Ok((metrics, true));
+    }
+
+    let metrics = RenderMetrics::new(fonts)?;
+    *RENDER_METRICS_CACHE.lock().unwrap() = Some(RenderMetricsCacheEntry { key, metrics });
+    persist_render_metrics_to_disk(key, metrics);
+    Ok((metrics, false))
 }
 
 pub const ICON_DATA: &'static [u8] = include_bytes!("../../../assets/logo.png");
@@ -203,6 +464,7 @@ pub struct PaneState {
     pub overlay: Option<OverlayState>,
 
     bell_start: Option<Instant>,
+    pub has_unread_bell: bool,
     pub mouse_terminal_coords: Option<(ClickPosition, StableRowIndex)>,
 }
 
@@ -220,7 +482,7 @@ pub struct TabInformation {
 
 impl UserData for TabInformation {
     fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("tab_id", |_, this| Ok(this.tab_id));
+        fields.add_field_method_get("tab_id", |_, this| Ok(this.tab_id.as_usize()));
         fields.add_field_method_get("tab_index", |_, this| Ok(this.tab_index));
         fields.add_field_method_get("is_active", |_, this| Ok(this.is_active));
         fields.add_field_method_get("is_last_active", |_, this| Ok(this.is_last_active));
@@ -276,7 +538,7 @@ pub struct PaneInformation {
 
 impl UserData for PaneInformation {
     fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("pane_id", |_, this| Ok(this.pane_id));
+        fields.add_field_method_get("pane_id", |_, this| Ok(this.pane_id.as_usize()));
         fields.add_field_method_get("pane_index", |_, this| Ok(this.pane_index));
         fields.add_field_method_get("is_active", |_, this| Ok(this.is_active));
         fields.add_field_method_get("is_zoomed", |_, this| Ok(this.is_zoomed));
@@ -362,6 +624,37 @@ enum EventState {
     InProgressWithQueued(Option<PaneId>),
 }
 
+/// State tracked during a live split-divider drag.
+struct SplitDragState {
+    tab_id: TabId,
+}
+
+/// State tracked during a live tab drag-reorder gesture.
+struct TabDragState {
+    tab_idx: usize,
+    start_event: MouseEvent,
+    has_dragged: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEditorSelectionDirection {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEditorSelectionState {
+    None,
+    Charwise {
+        direction: LineEditorSelectionDirection,
+        count: usize,
+    },
+    ToStart,
+    ToEnd,
+    All,
+    Unknown,
+}
+
 pub struct TermWindow {
     pub window: Option<Window>,
     pub config: ConfigHandle,
@@ -403,9 +696,12 @@ pub struct TermWindow {
     /// Suppresses subsequent Move/Release events to prevent unwanted
     /// text selection in TUI applications during OS-level window resize.
     edge_drag_in_progress: bool,
+    is_window_dragging: bool,
     current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
     last_scroll_info: RenderableDimensions,
+    line_editor_selection: LineEditorSelectionState,
+    line_editor_selection_owner: Option<PaneId>,
 
     tab_state: RefCell<HashMap<TabId, TabState>>,
     pane_state: RefCell<HashMap<PaneId, PaneState>>,
@@ -444,6 +740,8 @@ pub struct TermWindow {
 
     ui_items: Vec<UIItem>,
     dragging: Option<(UIItem, MouseEvent)>,
+    split_drag_state: Option<SplitDragState>,
+    tab_drag_state: Option<TabDragState>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -464,12 +762,26 @@ pub struct TermWindow {
 
     connection_name: String,
 
+    /// Tracks whether we are currently in a live resize operation
+    live_resizing: bool,
+
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
+    pending_config_reload_after_resize: bool,
+    silent_reload_queued: bool,
+    closed_tab_history: std::collections::VecDeque<PathBuf>,
+
+    /// Toast notification: (start_time, message, lifetime)
+    toast: Option<(Instant, String, Duration)>,
+    selection_copy_disabled_hint_shown: bool,
 }
 
 impl TermWindow {
+    fn should_reload_config_for_user_var(name: &str, window_contains_pane: bool) -> bool {
+        window_contains_pane && name == "KAKU_CONFIG_CHANGED"
+    }
+
     fn load_os_parameters(&mut self) {
         if let Some(ref window) = self.window {
             self.os_parameters = match window.get_os_parameters(&self.config, self.window_state) {
@@ -482,46 +794,77 @@ impl TermWindow {
         }
     }
 
-    fn close_requested(&mut self, window: &Window) {
-        let mux = Mux::get();
-        match self.config.window_close_confirmation {
-            WindowCloseConfirmation::NeverPrompt => {
-                // Immediately kill the tabs and allow the window to close
+    fn close_requested(&mut self, _window: &Window) {
+        #[cfg(target_os = "macos")]
+        {
+            let mux = Mux::get();
+
+            // Check if this is a TermWizTerminal window (e.g., config error dialog)
+            // These windows should be closed directly, not hidden
+            let is_termwiz_window = mux
+                .get_active_tab_for_window(self.mux_window_id)
+                .and_then(|tab| {
+                    tab.iter_panes_ignoring_zoom()
+                        .first()
+                        .map(|p| p.pane.domain_id())
+                })
+                .and_then(|domain_id| mux.get_domain(domain_id))
+                .map(|domain| domain.domain_name() == "TermWizTerminalDomain")
+                .unwrap_or(false);
+
+            if is_termwiz_window {
+                // For TermWiz windows (config error dialogs), close the window
                 mux.kill_window(self.mux_window_id);
-                window.close();
-                front_end().forget_known_window(window);
+                _window.close();
+                front_end().forget_known_window(_window);
+            } else {
+                // For normal terminal windows, hide the window without minimize animation
+                _window.order_out();
             }
-            WindowCloseConfirmation::AlwaysPrompt => {
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
-                    Some(tab) => tab,
-                    None => {
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mux = Mux::get();
+            match self.config.window_close_confirmation {
+                WindowCloseConfirmation::NeverPrompt => {
+                    // Immediately kill the tabs and allow the window to close
+                    mux.kill_window(self.mux_window_id);
+                    _window.close();
+                    front_end().forget_known_window(_window);
+                }
+                WindowCloseConfirmation::AlwaysPrompt => {
+                    let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                        Some(tab) => tab,
+                        None => {
+                            mux.kill_window(self.mux_window_id);
+                            _window.close();
+                            front_end().forget_known_window(_window);
+                            return;
+                        }
+                    };
+
+                    let mux_window_id = self.mux_window_id;
+
+                    let can_close = mux
+                        .get_window(mux_window_id)
+                        .map_or(false, |w| w.can_close_without_prompting());
+                    if can_close {
                         mux.kill_window(self.mux_window_id);
-                        window.close();
-                        front_end().forget_known_window(window);
+                        _window.close();
+                        front_end().forget_known_window(_window);
                         return;
                     }
-                };
+                    let window = self.window.clone().unwrap();
+                    let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
+                        confirm_close_window(term, mux_window_id, window, tab_id)
+                    });
+                    self.assign_overlay(tab.tab_id(), overlay);
+                    promise::spawn::spawn(future).detach();
 
-                let mux_window_id = self.mux_window_id;
-
-                let can_close = mux
-                    .get_window(mux_window_id)
-                    .map_or(false, |w| w.can_close_without_prompting());
-                if can_close {
-                    mux.kill_window(self.mux_window_id);
-                    window.close();
-                    front_end().forget_known_window(window);
-                    return;
+                    // Don't close right now; let the close happen from
+                    // the confirmation overlay
                 }
-                let window = self.window.clone().unwrap();
-                let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
-                    confirm_close_window(term, mux_window_id, window, tab_id)
-                });
-                self.assign_overlay(tab.tab_id(), overlay);
-                promise::spawn::spawn(future).detach();
-
-                // Don't close right now; let the close happen from
-                // the confirmation overlay
             }
         }
     }
@@ -531,6 +874,10 @@ impl TermWindow {
         self.focused = if focused { Some(Instant::now()) } else { None };
         self.quad_generation += 1;
         self.load_os_parameters();
+
+        if let Some(modal) = self.get_modal() {
+            modal.focus_changed(focused, self);
+        }
 
         if self.focused.is_none() {
             self.last_mouse_click = None;
@@ -551,6 +898,14 @@ impl TermWindow {
 
         if let Some(pane) = self.get_active_pane_or_overlay() {
             pane.focus_changed(focused);
+            if focused {
+                let mut state = self.pane_state(pane.pane_id());
+                if state.has_unread_bell {
+                    state.has_unread_bell = false;
+                    drop(state);
+                    front_end().adjust_unread_bell_count(-1);
+                }
+            }
         }
 
         self.update_title();
@@ -586,10 +941,31 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    fn schedule_silent_config_reload(&mut self, window: &Window) {
+        if self.silent_reload_queued {
+            return;
+        }
+        self.silent_reload_queued = true;
+        let window = window.clone();
+        promise::spawn::spawn_into_main_thread(async move {
+            // Coalesce rapid override updates and run after current event dispatch.
+            Timer::after(Duration::from_millis(1)).await;
+            window.notify(TermWindowNotif::Apply(Box::new(|tw| {
+                tw.config_was_reloaded_silently();
+                tw.silent_reload_queued = false;
+            })));
+        })
+        .detach();
+    }
+
     pub async fn new_window(mux_window_id: MuxWindowId) -> anyhow::Result<()> {
         let config = configuration();
         let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
         let fontconfig = Rc::new(FontConfiguration::new(Some(config.clone()), dpi)?);
+        let persisted_font_scale = resize::load_persisted_font_scale(&config);
+        if let Some(font_scale) = persisted_font_scale {
+            fontconfig.change_scaling(font_scale, dpi);
+        }
 
         let mux = Mux::get();
         let size = match mux.get_active_tab_for_window(mux_window_id) {
@@ -602,7 +978,8 @@ impl TermWindow {
         let physical_rows = size.rows as usize;
         let physical_cols = size.cols as usize;
 
-        let render_metrics = RenderMetrics::new(&fontconfig)?;
+        let (render_metrics, _metrics_cache_hit) =
+            render_metrics_from_cache_or_compute(&fontconfig, &config, dpi, persisted_font_scale)?;
         log::trace!("using render_metrics {:#?}", render_metrics);
 
         // Initially we have only a single tab, so take that into account
@@ -651,8 +1028,13 @@ impl TermWindow {
             pixel_max: terminal_size.pixel_height as f32,
             pixel_cell: render_metrics.cell_size.height as f32,
         };
-        let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let (padding_top, padding_bottom) = resize::effective_vertical_padding(
+            &config,
+            v_context,
+            show_tab_bar,
+            config.tab_bar_at_bottom,
+            tab_bar_height,
+        );
 
         let mut dimensions = Dimensions {
             pixel_width: (terminal_size.pixel_width + padding_left + padding_right) as usize,
@@ -663,7 +1045,14 @@ impl TermWindow {
             dpi,
         };
 
-        let border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+        let mut border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
+
+        // Mirror get_os_border() for non-fullscreen startup windows.
+        let integrated_top_inset =
+            crate::termwindow::render::borders::integrated_buttons_top_inset(&config, false);
+        if integrated_top_inset > 0 {
+            border.top += ULength::new(integrated_top_inset);
+        }
 
         dimensions.pixel_height += (border.top + border.bottom).get() as usize;
         dimensions.pixel_width += (border.left + border.right).get() as usize;
@@ -679,7 +1068,15 @@ impl TermWindow {
 
         let render_state = None;
 
-        let connection_name = Connection::get().unwrap().name();
+        let connection_name = Connection::get().map_or_else(
+            || {
+                log::warn!(
+                    "window connection is not initialized while creating TermWindow; using placeholder"
+                );
+                "uninitialized".to_string()
+            },
+            |conn| conn.name(),
+        );
 
         let myself = Self {
             created: Instant::now(),
@@ -689,6 +1086,9 @@ impl TermWindow {
             last_frame_duration: Duration::ZERO,
             fps: 0.,
             config_subscription: None,
+            pending_config_reload_after_resize: false,
+            silent_reload_queued: false,
+            closed_tab_history: std::collections::VecDeque::new(),
             os_parameters: None,
             gl: None,
             webgpu: None,
@@ -721,10 +1121,13 @@ impl TermWindow {
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             edge_drag_in_progress: false,
+            is_window_dragging: false,
             current_mouse_event: None,
             current_modifier_and_leds: Default::default(),
             prev_cursor: PrevCursorPos::new(),
             last_scroll_info: RenderableDimensions::default(),
+            line_editor_selection: LineEditorSelectionState::None,
+            line_editor_selection_owner: None,
             tab_state: RefCell::new(HashMap::new()),
             pane_state: RefCell::new(HashMap::new()),
             current_mouse_buttons: vec![],
@@ -788,11 +1191,16 @@ impl TermWindow {
             semantic_zones: HashMap::new(),
             ui_items: vec![],
             dragging: None,
+            split_drag_state: None,
+            tab_drag_state: None,
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
             modal: RefCell::new(None),
             opengl_info: None,
+            toast: None,
+            selection_copy_disabled_hint_shown: false,
+            live_resizing: false,
         };
 
         let tw = Rc::new(RefCell::new(myself));
@@ -837,6 +1245,17 @@ impl TermWindow {
         .await?;
         tw.borrow_mut().window.replace(window.clone());
 
+        // Show the window as early as possible so the user sees it while
+        // GPU initialization runs in the background.
+        {
+            let mut myself = tw.borrow_mut();
+            myself.load_os_parameters();
+        }
+        crate::startup_trace::mark("  window.show() start");
+        window.show();
+        crate::startup_trace::mark("  window.show() done");
+
+        // These run after show — they don't affect window visibility.
         Self::apply_icon(&window)?;
 
         let config_subscription = config::subscribe_to_config_reload({
@@ -848,20 +1267,30 @@ impl TermWindow {
                 true
             }
         });
+        config::enable_deferred_watchers();
 
-        let gl = match config.front_end {
-            FrontEndSelection::WebGpu => None,
-            _ => Some(window.enable_opengl().await?),
+        crate::startup_trace::mark("  GPU init start");
+        let (gl, webgpu) = match config.front_end {
+            FrontEndSelection::WebGpu => match WebGpuState::new(&window, dimensions, &config).await
+            {
+                Ok(state) => (None, Some(Rc::new(state))),
+                Err(err) => {
+                    log::error!(
+                        "WebGpu initialization failed; falling back to OpenGL. Error: {:#}",
+                        err
+                    );
+                    let gl = window.enable_opengl().await.with_context(|| {
+                        "WebGpu initialization failed and OpenGL fallback also failed"
+                    })?;
+                    (Some(gl), None)
+                }
+            },
+            _ => (Some(window.enable_opengl().await?), None),
         };
+        crate::startup_trace::mark("  GPU init done");
 
         {
             let mut myself = tw.borrow_mut();
-            let webgpu = match config.front_end {
-                FrontEndSelection::WebGpu => Some(Rc::new(
-                    WebGpuState::new(&window, dimensions, &config).await?,
-                )),
-                _ => None,
-            };
             myself.config_subscription.replace(config_subscription);
             if config.use_resize_increments {
                 window.set_resize_increments(
@@ -887,8 +1316,6 @@ impl TermWindow {
                 myself.webgpu.replace(Rc::clone(&webgpu));
                 myself.created(RenderContext::WebGpu(Rc::clone(&webgpu)))?;
             }
-            myself.load_os_parameters();
-            window.show();
             myself.subscribe_to_pane_updates();
             myself.emit_window_event("window-config-reloaded", None);
             myself.emit_status_event();
@@ -905,15 +1332,18 @@ impl TermWindow {
         event: WindowEvent,
         window: &Window,
     ) -> anyhow::Result<bool> {
-        log::debug!("{event:?}");
+        log::trace!("{event:?}");
         match event {
             WindowEvent::Destroyed => {
+                self.window.take();
+                self.event_states.clear();
                 // Ensure that we cancel any overlays we had running, so
                 // that the mux can empty out, otherwise the mux keeps
                 // the TermWindow alive via the frontend even though
                 // the window is gone and we'll linger forever.
                 // <https://github.com/wezterm/wezterm/issues/3522>
                 self.clear_all_overlays();
+                front_end().forget_known_window(window);
                 Ok(false)
             }
             WindowEvent::CloseRequested => {
@@ -933,7 +1363,9 @@ impl TermWindow {
                 // be nasty for folks with a lot of windows.
                 // <https://github.com/wezterm/wezterm/issues/2295>
                 config::reload();
-                self.config_was_reloaded();
+                // Defer per-window reload to avoid re-entrant RefCell borrow
+                // while dispatching the current window event.
+                self.schedule_silent_config_reload(window);
                 Ok(true)
             }
             WindowEvent::PerformKeyAssignment(action) => {
@@ -1091,14 +1523,14 @@ impl TermWindow {
     }
 
     fn do_paint_webgpu(&mut self) -> anyhow::Result<bool> {
-        self.webgpu.as_mut().unwrap().resize(self.dimensions, false);
+        self.webgpu.as_mut().unwrap().resize(self.dimensions);
         match self.do_paint_webgpu_impl() {
             Ok(ok) => Ok(ok),
             Err(err) => {
                 match err.downcast_ref::<wgpu::SurfaceError>() {
                     Some(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         log::warn!("wgpu surface lost/outdated, reconfiguring and retrying");
-                        self.webgpu.as_mut().unwrap().resize(self.dimensions, false);
+                        self.webgpu.as_mut().unwrap().resize(self.dimensions);
                         return self.do_paint_webgpu_impl();
                     }
                     Some(wgpu::SurfaceError::Timeout) => {
@@ -1199,7 +1631,10 @@ impl TermWindow {
             TermWindowNotif::SetConfigOverrides(value) => {
                 if value != self.config_overrides {
                     self.config_overrides = value;
-                    self.config_was_reloaded();
+                    // Overrides are often updated by runtime hooks (eg: resize/fullscreen),
+                    // so keep this reload silent to avoid noisy toast spam.
+                    // Defer the reload to avoid re-entrant borrow of WindowInner.
+                    self.schedule_silent_config_reload(window);
                 }
             }
             TermWindowNotif::CancelOverlayForPane(pane_id) => {
@@ -1256,8 +1691,31 @@ impl TermWindow {
                     log::trace!("Ding! (this is the bell) in pane {}", pane_id);
                     self.emit_window_event("bell", Some(pane_id));
 
+                    // Check active pane FIRST, before borrowing pane_state.
+                    // get_active_pane_or_overlay() also borrows pane_state internally,
+                    // so holding a RefMut from pane_state() simultaneously would cause
+                    // a RefCell double-borrow panic at runtime.
+                    let is_inactive = self
+                        .get_active_pane_or_overlay()
+                        .map_or(true, |p| p.pane_id() != pane_id);
+
+                    let window_has_focus = self.focused.is_some();
                     let mut per_pane = self.pane_state(pane_id);
                     per_pane.bell_start.replace(Instant::now());
+                    // Mark as unread if pane is inactive, OR if window has no focus
+                    // (so Dock badge works even for active pane bells)
+                    let should_mark_unread =
+                        (is_inactive || !window_has_focus) && !per_pane.has_unread_bell;
+                    if should_mark_unread {
+                        per_pane.has_unread_bell = true;
+                    }
+                    drop(per_pane);
+
+                    // Update global Dock badge count
+                    if should_mark_unread {
+                        front_end().adjust_unread_bell_count(1);
+                    }
+
                     window.invalidate();
                 }
                 MuxNotification::Alert {
@@ -1322,9 +1780,16 @@ impl TermWindow {
                 MuxNotification::TabTitleChanged { .. } => {
                     self.update_title_post_status();
                 }
+                MuxNotification::PaneRemoved(pane_id) => {
+                    // Clean up pane state and adjust global bell count if needed
+                    if let Some(state) = self.pane_state.borrow_mut().remove(&pane_id) {
+                        if state.has_unread_bell {
+                            front_end().adjust_unread_bell_count(-1);
+                        }
+                    }
+                }
                 MuxNotification::PaneAdded(_)
                 | MuxNotification::WorkspaceRenamed { .. }
-                | MuxNotification::PaneRemoved(_)
                 | MuxNotification::WindowWorkspaceChanged(_)
                 | MuxNotification::ActiveWorkspaceChanged(_)
                 | MuxNotification::Empty
@@ -1403,19 +1868,35 @@ impl TermWindow {
             self.cancel_overlay_for_tab(tab_id, None);
         }
 
+        // Adjust global bell count before clearing pane state
+        let unread_count = self
+            .pane_state
+            .borrow()
+            .values()
+            .filter(|s| s.has_unread_bell)
+            .count() as isize;
+        if unread_count > 0 {
+            front_end().adjust_unread_bell_count(-unread_count);
+        }
+
         self.pane_state.borrow_mut().clear();
         self.tab_state.borrow_mut().clear();
     }
 
-    fn apply_icon(window: &Window) -> anyhow::Result<()> {
-        let image = image::load_from_memory(ICON_DATA)?.into_rgba8();
-        let (width, height) = image.dimensions();
-        window.set_icon(Image::with_rgba32(
-            width as usize,
-            height as usize,
-            width as usize * 4,
-            image.as_raw(),
-        ));
+    fn apply_icon(_window: &Window) -> anyhow::Result<()> {
+        // On macOS the app bundle provides the icon via Info.plist;
+        // set_icon() is a no-op there, so skip the PNG decode entirely.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let image = image::load_from_memory(ICON_DATA)?.into_rgba8();
+            let (width, height) = image.dimensions();
+            _window.set_icon(Image::with_rgba32(
+                width as usize,
+                height as usize,
+                width as usize * 4,
+                image.as_raw(),
+            ));
+        }
         Ok(())
     }
 
@@ -1461,95 +1942,35 @@ impl TermWindow {
         dead: &Arc<AtomicBool>,
     ) -> bool {
         if dead.load(Ordering::Relaxed) {
-            // Subscription cancelled asynchronously
             return false;
         }
 
-        match n {
-            MuxNotification::Alert {
-                pane_id,
-                alert:
-                    Alert::OutputSinceFocusLost
-                    | Alert::CurrentWorkingDirectoryChanged
-                    | Alert::WindowTitleChanged(_)
-                    | Alert::TabTitleChanged(_)
-                    | Alert::IconTitleChanged(_)
-                    | Alert::Progress(_)
-                    | Alert::SetUserVar { .. }
-                    | Alert::Bell,
-            }
-            | MuxNotification::PaneFocused(pane_id)
-            | MuxNotification::PaneRemoved(pane_id)
-            | MuxNotification::PaneOutput(pane_id) => {
-                // Ideally we'd check to see if pane_id is part of this window,
-                // but overlays may not be 100% associated with the window
-                // in the mux and we don't want to lose the invalidation
-                // signal for that case, so we just check window validity
-                // here and propagate to the window event handler that
-                // will then do the check with full context.
+        // Most filtering is done in subscribe_to_pane_updates before spawning.
+        // Here we only do final validity checks that require main thread context.
+        match &n {
+            MuxNotification::PaneFocused(_)
+            | MuxNotification::PaneRemoved(_)
+            | MuxNotification::PaneOutput(_)
+            | MuxNotification::Alert { .. } => {
+                // Verify window still exists
                 let mux = Mux::get();
                 if mux.get_window(mux_window_id).is_none() {
-                    // Something inconsistent: cancel subscription
                     log::debug!(
-                        "PaneOutput: wanted mux_window_id={} from mux, but \
-                         was not found, cancel mux subscription",
+                        "mux_window_id={} not found, cancel subscription",
                         mux_window_id
                     );
                     return false;
                 }
-                let _ = pane_id;
             }
-            MuxNotification::PaneAdded(_pane_id) => {
-                // If some other client spawns a pane inside this window, this
-                // gives us an opportunity to attach it to the clipboard.
+            MuxNotification::PaneAdded(_) => {
                 let mux = Mux::get();
                 return mux.get_window(mux_window_id).is_some();
             }
-            MuxNotification::TabAddedToWindow { window_id, .. }
-            | MuxNotification::WindowTitleChanged { window_id, .. }
-            | MuxNotification::WindowInvalidated(window_id) => {
-                if window_id != mux_window_id {
-                    return true;
-                }
-            }
-            MuxNotification::WindowRemoved(window_id) => {
-                if window_id != mux_window_id {
-                    return true;
-                }
-                // Set the window as dead to unsubscribe from further notifications
-                dead.store(true, Ordering::Relaxed);
-                return false;
-            }
-            MuxNotification::TabResized(tab_id)
-            | MuxNotification::TabTitleChanged { tab_id, .. } => {
-                let mux = Mux::get();
-                if mux.window_containing_tab(tab_id) == Some(mux_window_id) {
-                    // fall through
-                } else {
-                    return true;
-                }
-            }
-            MuxNotification::Alert {
-                alert: Alert::ToastNotification { .. },
-                ..
-            }
-            | MuxNotification::AssignClipboard { .. }
-            | MuxNotification::SaveToDownloads { .. }
-            | MuxNotification::WindowCreated(_)
-            | MuxNotification::ActiveWorkspaceChanged(_)
-            | MuxNotification::WorkspaceRenamed { .. }
-            | MuxNotification::Empty
-            | MuxNotification::WindowWorkspaceChanged(_) => return true,
-            MuxNotification::Alert {
-                alert: Alert::PaletteChanged { .. },
-                ..
-            } => {
-                // fall through
-            }
+            // All other notifications are pre-filtered in subscribe_to_pane_updates
+            _ => {}
         }
 
         window.notify(TermWindowNotif::MuxNotification(n));
-
         true
     }
 
@@ -1563,6 +1984,84 @@ impl TermWindow {
                 return false;
             }
             let mux_window_id = *mux_window_id.lock().unwrap();
+
+            // Pre-filter notifications to avoid unnecessary main thread task spawning.
+            // This reduces O(windows × notifications) fan-out in multi-window scenarios.
+            let dominated_mux = Mux::try_get();
+            let can_resolve_pane_ownership = dominated_mux
+                .as_ref()
+                .map(|mux| !mux.is_main_thread())
+                .unwrap_or(false);
+            match &n {
+                // Notifications with explicit window_id: skip if not for this window
+                MuxNotification::TabAddedToWindow { window_id, .. }
+                | MuxNotification::WindowTitleChanged { window_id, .. }
+                | MuxNotification::WindowInvalidated(window_id) => {
+                    if *window_id != mux_window_id {
+                        return true;
+                    }
+                }
+                MuxNotification::WindowRemoved(window_id) => {
+                    if *window_id != mux_window_id {
+                        return true;
+                    }
+                    dead.store(true, Ordering::Relaxed);
+                    return false;
+                }
+                // Notifications with pane_id: check pane ownership
+                MuxNotification::PaneOutput(pane_id)
+                | MuxNotification::PaneFocused(pane_id)
+                | MuxNotification::PaneRemoved(pane_id)
+                | MuxNotification::PaneAdded(pane_id) => {
+                    if can_resolve_pane_ownership {
+                        let mux = dominated_mux.as_ref().expect("checked above");
+                        // If we can resolve the pane and it belongs to a different window, skip
+                        if let Some((_, window_id, _)) = mux.resolve_pane_id(*pane_id) {
+                            if window_id != mux_window_id {
+                                return true;
+                            }
+                        }
+                        // If pane not found (e.g. overlay), fall through to spawn
+                        //
+                        // Avoid resolving on the main thread: focus changes emit PaneFocused
+                        // while still holding the tab mutex, so resolving ownership here would
+                        // re-enter Tab::iter_panes_ignoring_zoom() and self-deadlock the UI.
+                    }
+                }
+                // Alert notifications with pane_id
+                MuxNotification::Alert { pane_id, .. } => {
+                    if can_resolve_pane_ownership {
+                        let mux = dominated_mux.as_ref().expect("checked above");
+                        if let Some((_, window_id, _)) = mux.resolve_pane_id(*pane_id) {
+                            if window_id != mux_window_id {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Tab notifications: check tab ownership
+                MuxNotification::TabResized(tab_id)
+                | MuxNotification::TabTitleChanged { tab_id, .. } => {
+                    if let Some(ref mux) = dominated_mux {
+                        if let Some(window_id) = mux.window_containing_tab(*tab_id) {
+                            if window_id != mux_window_id {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Global notifications not relevant to individual windows
+                MuxNotification::AssignClipboard { .. }
+                | MuxNotification::SaveToDownloads { .. }
+                | MuxNotification::WindowCreated(_)
+                | MuxNotification::ActiveWorkspaceChanged(_)
+                | MuxNotification::WorkspaceRenamed { .. }
+                | MuxNotification::Empty
+                | MuxNotification::WindowWorkspaceChanged(_) => {
+                    return true;
+                }
+            }
+
             let window = window.clone();
             let dead = dead.clone();
             promise::spawn::spawn_into_main_thread(async move {
@@ -1688,47 +2187,43 @@ impl TermWindow {
             }
         }
     }
-
-    fn check_for_dirty_lines_and_invalidate_selection(&mut self, pane: &Arc<dyn Pane>) {
-        let dims = pane.get_dimensions();
-        let viewport = self
-            .get_viewport(pane.pane_id())
-            .unwrap_or(dims.physical_top);
-        let visible_range = viewport..viewport + dims.viewport_rows as StableRowIndex;
-        let seqno = self.selection(pane.pane_id()).seqno;
-        let dirty = pane.get_changed_since(visible_range, seqno);
-
-        if dirty.is_empty() {
-            return;
-        }
-        if pane.downcast_ref::<CopyOverlay>().is_none()
-            && pane.downcast_ref::<QuickSelectOverlay>().is_none()
-        {
-            // If any of the changed lines intersect with the
-            // selection, then we need to clear the selection, but not
-            // when the search overlay is active; the search overlay
-            // marks lines as dirty to force invalidate them for
-            // highlighting purpose but also manipulates the selection
-            // and we want to allow it to retain the selection it made!
-
-            let clear_selection =
-                if let Some(selection_range) = self.selection(pane.pane_id()).range.as_ref() {
-                    let selection_rows = selection_range.rows();
-                    selection_rows.into_iter().any(|row| dirty.contains(row))
-                } else {
-                    false
-                };
-
-            if clear_selection {
-                self.selection(pane.pane_id()).range.take();
-                self.selection(pane.pane_id()).origin.take();
-                self.selection(pane.pane_id()).seqno = pane.get_current_seqno();
-            }
-        }
-    }
 }
 
 impl TermWindow {
+    /// Computes effective vertical padding for the current window state.
+    pub fn effective_vertical_padding(&self) -> (usize, usize) {
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.) as usize
+        } else {
+            0
+        };
+        resize::effective_vertical_padding(
+            &self.config,
+            DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.terminal_size.pixel_height as f32,
+                pixel_cell: self.render_metrics.cell_size.height as f32,
+            },
+            self.show_tab_bar,
+            self.config.tab_bar_at_bottom,
+            tab_bar_height,
+        )
+    }
+
+    /// Decide whether the tab bar should be visible based on tab count,
+    /// fullscreen state, and config.
+    fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
+        let is_full_screen = self.window_state.contains(WindowState::FULL_SCREEN);
+        if is_full_screen {
+            // Always show tab bar in fullscreen mode to display the right status (time)
+            self.config.enable_tab_bar
+        } else if num_tabs == 1 {
+            self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
+        } else {
+            self.config.enable_tab_bar
+        }
+    }
+
     fn palette(&mut self) -> &ColorPalette {
         if self.palette.is_none() {
             self.palette
@@ -1738,21 +2233,55 @@ impl TermWindow {
     }
 
     pub fn config_was_reloaded(&mut self) {
+        // Skip config reload during live resizing to avoid performance issues
+        // when dragging the window. The reload will be processed after resize completes.
+        if self.live_resizing {
+            log::trace!("Skipping config reload during live resizing");
+            self.pending_config_reload_after_resize = true;
+            return;
+        }
+
+        self.config_was_reloaded_impl();
+    }
+
+    fn config_was_reloaded_silently(&mut self) {
+        if self.live_resizing {
+            self.pending_config_reload_after_resize = true;
+            return;
+        }
+        self.config_was_reloaded_impl();
+    }
+
+    fn config_was_reloaded_impl(&mut self) {
         log::debug!(
             "config was reloaded, overrides: {:?}",
             self.config_overrides
         );
         self.key_table_state.clear_stack();
-        self.connection_name = Connection::get().unwrap().name();
-        let config = match config::overridden_config(&self.config_overrides) {
-            Ok(config) => config,
-            Err(err) => {
-                log::error!(
-                    "Failed to apply config overrides to window: {:#}: {:?}",
-                    err,
-                    self.config_overrides
+        self.connection_name = Connection::get().map_or_else(
+            || {
+                log::warn!(
+                    "window connection is not initialized during config reload; keeping placeholder"
                 );
-                configuration()
+                "uninitialized".to_string()
+            },
+            |conn| conn.name(),
+        );
+        let config = if matches!(&self.config_overrides, Value::Null)
+            || matches!(&self.config_overrides, Value::Object(obj) if obj.is_empty())
+        {
+            configuration()
+        } else {
+            match config::overridden_config(&self.config_overrides) {
+                Ok(config) => config,
+                Err(err) => {
+                    log::error!(
+                        "Failed to apply config overrides to window: {:#}: {:?}",
+                        err,
+                        self.config_overrides
+                    );
+                    configuration()
+                }
             }
         };
         self.config = config.clone();
@@ -1763,11 +2292,7 @@ impl TermWindow {
             Some(window) => window,
             _ => return,
         };
-        if window.len() == 1 {
-            self.show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
-        } else {
-            self.show_tab_bar = config.enable_tab_bar;
-        }
+        self.show_tab_bar = self.should_show_tab_bar(window.len());
         *self.cursor_blink_state.borrow_mut() = ColorEase::new(
             config.cursor_blink_rate,
             config.cursor_blink_ease_in,
@@ -1814,6 +2339,15 @@ impl TermWindow {
             log::error!("Failed to load font configuration: {:#}", err);
         }
 
+        // Recreate texture atlas to ensure subpixel AA and font rendering changes
+        // correctly flush out the old cached glyphs when theme changes.
+        if let Err(err) = self.recreate_texture_atlas(None) {
+            log::error!(
+                "recreate_texture_atlas after config reload failed: {:#}",
+                err
+            );
+        }
+
         if let Some(window) = mux.get_window(self.mux_window_id) {
             let term_config: Arc<dyn TerminalConfiguration> =
                 Arc::new(TermConfig::with_config(config.clone()));
@@ -1838,6 +2372,9 @@ impl TermWindow {
             self.load_os_parameters();
             self.apply_scale_change(&dimensions, self.fonts.get_font_scale());
             self.apply_dimensions(&dimensions, None, &window);
+            // Rebuild tab bar state synchronously so tab bar colors match the
+            // new palette in the same invalidate cycle as pane colors.
+            self.update_title_impl();
             window.config_did_change(&config);
             window.invalidate();
         }
@@ -1853,6 +2390,10 @@ impl TermWindow {
 
         self.invalidate_modal();
         self.emit_window_event("window-config-reloaded", None);
+
+        // Sync Dock badge in case bell_dock_badge was toggled.
+        // Passing 0 re-evaluates badge state without changing the count.
+        front_end().sync_unread_bell_badge();
     }
 
     fn invalidate_modal(&mut self) {
@@ -1924,7 +2465,22 @@ impl TermWindow {
     }
 
     fn emit_user_var_event(&mut self, pane_id: PaneId, name: String, value: String) {
-        if !self.window_contains_pane(pane_id) {
+        let window_contains_pane = self.window_contains_pane(pane_id);
+
+        // Config TUI signals that config file was just saved; reload immediately.
+        // Only the window containing the signaling pane triggers reload to avoid
+        // duplicate reloads when multiple windows are open.
+        // Note: config::reload() notifies subscribers, and each window reloads from
+        // that subscription path. We intentionally avoid calling
+        // config_was_reloaded_impl() directly here so this event only triggers one
+        // per-window reload, and we also avoid predicting the next generation value:
+        // failed reloads do not advance config generation.
+        if Self::should_reload_config_for_user_var(&name, window_contains_pane) {
+            config::reload();
+            return;
+        }
+
+        if !window_contains_pane {
             return;
         }
 
@@ -2011,6 +2567,7 @@ impl TermWindow {
             },
             &tabs,
             &panes,
+            self.window_state.contains(WindowState::FULL_SCREEN),
             self.config.resolved_palette.tab_bar.as_ref(),
             &self.config,
             &self.left_status,
@@ -2088,18 +2645,26 @@ impl TermWindow {
         if let Some(window) = self.window.as_ref() {
             window.set_title(&title);
 
-            let show_tab_bar = if num_tabs == 1 {
-                self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
-            } else {
-                self.config.enable_tab_bar
-            };
+            let show_tab_bar = self.should_show_tab_bar(num_tabs);
 
             // If the number of tabs changed and caused the tab bar to
-            // hide/show, then we'll need to resize things.  It is simplest
-            // to piggy back on the config reloading code for that, so that
-            // is what we're doing.
+            // hide/show, then we'll need to resize things. We only update
+            // what's needed for tab bar visibility to avoid the stutter
+            // caused by a full config_was_reloaded() call.
             if show_tab_bar != self.show_tab_bar {
-                self.config_was_reloaded();
+                let owned_window = window.clone();
+                self.show_tab_bar = show_tab_bar;
+                // Pre-warm the title font so the first paint of the tab bar
+                // does not block on lazy font loading (which causes a stutter
+                // specifically at the 1↔2 tab boundary).
+                if show_tab_bar && self.config.use_fancy_tab_bar {
+                    let _ = self.fonts.title_font();
+                }
+                self.fancy_tab_bar.take();
+                self.invalidate_fancy_tab_bar();
+                let dimensions = self.dimensions;
+                self.apply_dimensions(&dimensions, None, &owned_window);
+                owned_window.invalidate();
             }
         }
         self.schedule_next_status_update();
@@ -2375,7 +2940,7 @@ impl TermWindow {
         let connection_info = self.connection_name.clone();
 
         let (overlay, future) = start_overlay(self, &tab, move |_tab_id, term| {
-            crate::overlay::show_debug_overlay(term, gui_win, opengl_info, connection_info)
+            show_debug_overlay(term, gui_win, opengl_info, connection_info)
         });
         self.assign_overlay(tab.tab_id(), overlay);
         promise::spawn::spawn(future).detach();
@@ -2404,9 +2969,7 @@ impl TermWindow {
             title: Some(title),
             flags: LauncherFlags::LAUNCH_MENU_ITEMS
                 | LauncherFlags::WORKSPACES
-                | LauncherFlags::DOMAINS
-                | LauncherFlags::KEY_ASSIGNMENTS
-                | LauncherFlags::COMMANDS,
+                | LauncherFlags::DOMAINS,
             help_text: None,
             fuzzy_help_text: None,
             alphabet: None,
@@ -2512,6 +3075,10 @@ impl TermWindow {
     }
 
     fn scroll_to_prompt(&mut self, amount: isize, pane: &Arc<dyn Pane>) -> anyhow::Result<()> {
+        // Exit peek mode when scroll_to_prompt leaves current viewport
+        if pane.is_primary_peek() {
+            pane.set_primary_peek(false);
+        }
         let dims = pane.get_dimensions();
         let position = self
             .get_viewport(pane.pane_id())
@@ -2541,6 +3108,10 @@ impl TermWindow {
             .unwrap_or(dims.physical_top) as f64
             + (amount * dims.viewport_rows as f64);
         self.set_viewport(pane.pane_id(), Some(position as isize), dims);
+        // Exit peek mode when scrolling to bottom
+        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+            pane.set_primary_peek(false);
+        }
         if let Some(win) = self.window.as_ref() {
             win.invalidate();
         }
@@ -2559,12 +3130,27 @@ impl TermWindow {
     }
 
     fn scroll_by_line(&mut self, amount: isize, pane: &Arc<dyn Pane>) -> anyhow::Result<()> {
+        let alt = pane.is_alt_screen_active();
+        let was_peeking = pane.is_primary_peek();
+
+        // Alt screen + scroll up → enter Primary Screen Peek
+        if alt && amount < 0 && !was_peeking {
+            pane.set_primary_peek(true);
+        }
+
         let dims = pane.get_dimensions();
         let position = self
             .get_viewport(pane.pane_id())
             .unwrap_or(dims.physical_top)
             .saturating_add(amount);
+
         self.set_viewport(pane.pane_id(), Some(position), dims);
+
+        // Scroll to bottom → exit peek, return to alt screen
+        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+            pane.set_primary_peek(false);
+        }
+
         if let Some(win) = self.window.as_ref() {
             win.invalidate();
         }
@@ -2779,8 +3365,18 @@ impl TermWindow {
             }
             CloseCurrentTab { confirm } => self.close_current_tab(*confirm),
             CloseCurrentPane { confirm } => self.close_current_pane(*confirm),
+            ReopenLastClosedTab => {
+                if let Some(cwd) = self.pop_closed_tab_cwd() {
+                    let spawn = SpawnCommand {
+                        cwd: Some(cwd),
+                        domain: config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
+                        ..SpawnCommand::default()
+                    };
+                    self.spawn_command(&spawn, SpawnWhere::NewTab);
+                }
+            }
             Nop | DisableDefaultAssignment => {}
-            ReloadConfiguration => config::reload(),
+            ReloadConfiguration => {}
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,
@@ -2810,7 +3406,6 @@ impl TermWindow {
             QuitApplication => {
                 let mux = Mux::get();
                 let config = &self.config;
-                log::info!("QuitApplication over here (window)");
 
                 match config.window_close_confirmation {
                     WindowCloseConfirmation::NeverPrompt => {
@@ -2841,13 +3436,52 @@ impl TermWindow {
             }
             StartWindowDrag => {
                 self.window_drag_position = self.current_mouse_event.clone();
+                self.is_window_dragging = self.window_drag_position.is_some();
             }
             OpenLinkAtMouseCursor => {
                 self.do_open_link_at_mouse_cursor(pane);
             }
             EmitEvent(name) => {
-                if name == "check-for-update" {
-                    crate::frontend::check_for_updates();
+                if name == "update-kaku" || name == "run-kaku-update" {
+                    crate::frontend::run_kaku_update_from_menu();
+                } else if name == "run-kaku-cli" {
+                    pane.writer().write_all(b"kaku\n")?;
+                } else if name == "run-kaku-ai-config" {
+                    pane.writer().write_all(b"kaku ai\n")?;
+                } else if let Some(msg) = lookup_kaku_toast(name) {
+                    self.show_toast(msg.to_string());
+                } else if name == "kaku-toast-ai-analyzing" {
+                    let message = "Kaku Assistant analyzing command";
+                    self.show_ai_progress_toast(message.to_string(), ai_toast_lifetime_ms(message));
+                } else if name == "kaku-toast-ai-applied" {
+                    // No notification on successful apply; command output is enough.
+                } else if let Some(msg) = lookup_ai_toast(name) {
+                    self.show_ai_result_notice(msg.to_string(), ai_toast_lifetime_ms(msg));
+                } else if let Some(payload) = name.strip_prefix("kaku-toast-ai-") {
+                    if let Some(message) = decode_hex_event_payload(payload) {
+                        let lifetime = ai_toast_lifetime_ms(&message);
+                        self.show_ai_result_notice(message, lifetime);
+                    }
+                } else if name == "open-kaku-config" {
+                    crate::frontend::open_kaku_config();
+                } else if name == crate::frontend::SET_DEFAULT_TERMINAL_EVENT {
+                    match Connection::get() {
+                        Some(conn) => match conn.set_default_terminal() {
+                            Ok(()) => {
+                                self.show_toast("Kaku is now the default terminal".to_string());
+                            }
+                            Err(err) => {
+                                log::error!("Failed to set Kaku as default terminal: {err:#}");
+                                self.show_toast("Failed to set default terminal".to_string());
+                            }
+                        },
+                        None => {
+                            log::error!(
+                                "Cannot set default terminal because no GUI connection is available"
+                            );
+                            self.show_toast("Failed to set default terminal".to_string());
+                        }
+                    }
                 } else {
                     self.emit_window_event(name, None);
                 }
@@ -2855,19 +3489,23 @@ impl TermWindow {
             CompleteSelectionOrOpenLinkAtMouseCursor(dest) => {
                 let text = self.selection_text(pane);
                 if !text.is_empty() {
-                    self.copy_to_clipboard(*dest, text);
-                    let window = self.window.as_ref().unwrap();
-                    window.invalidate();
+                    if self.config.copy_on_select {
+                        self.copy_to_clipboard(*dest, text);
+                        self.show_copy_toast();
+                    } else {
+                        self.show_copy_on_select_disabled_hint();
+                    }
                 } else {
                     self.do_open_link_at_mouse_cursor(pane);
                 }
             }
             CompleteSelection(dest) => {
                 let text = self.selection_text(pane);
-                if !text.is_empty() {
+                if !text.is_empty() && self.config.copy_on_select {
                     self.copy_to_clipboard(*dest, text);
-                    let window = self.window.as_ref().unwrap();
-                    window.invalidate();
+                    self.show_copy_toast();
+                } else if !text.is_empty() {
+                    self.show_copy_on_select_disabled_hint();
                 }
             }
             ClearScrollback(erase_mode) => {
@@ -3097,12 +3735,14 @@ impl TermWindow {
                         let config = config::configuration();
                         let _tab = domain
                             .spawn(
+                                &mux,
                                 config.initial_size(
                                     dpi,
                                     Some(crate::cell_pixel_dims(&config, dpi as f64)?),
                                 ),
                                 None,
                                 None,
+                                config.default_encoding,
                                 window,
                             )
                             .await?;
@@ -3125,6 +3765,14 @@ impl TermWindow {
                     RotationDirection::Clockwise => tab.rotate_clockwise(),
                     RotationDirection::CounterClockwise => tab.rotate_counter_clockwise(),
                 }
+            }
+            TogglePaneSplitDirection => {
+                let mux = Mux::get();
+                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                    Some(tab) => tab,
+                    None => return Ok(PerformAssignmentResult::Handled),
+                };
+                tab.toggle_pane_split_direction();
             }
             SplitPane(split) => {
                 log::trace!("SplitPane {:?}", split);
@@ -3180,6 +3828,13 @@ impl TermWindow {
             PromptInputLine(args) => self.show_prompt_input_line(args),
             InputSelector(args) => self.show_input_selector(args),
             Confirmation(args) => self.show_confirmation(args),
+            SetPaneEncoding(encoding) => {
+                let encoding: PaneEncoding = *encoding;
+                PaneEncoding::set_last_selected(encoding);
+                if let Some(pane) = self.get_active_pane_no_overlay() {
+                    pane.set_encoding(encoding);
+                }
+            }
         };
         Ok(PerformAssignmentResult::Handled)
     }
@@ -3193,6 +3848,14 @@ impl TermWindow {
         // perform below; here we allow the user to define an `open-uri` event
         // handler that can bypass the normal `open_url` functionality.
         if let Some(link) = self.current_highlight.as_ref().cloned() {
+            let uri = link.uri().to_string();
+            let is_file_uri = uri.starts_with("file://");
+            let resolved_target = if is_file_uri {
+                self.resolve_file_path(pane, &uri)
+            } else {
+                None
+            };
+
             let window = GuiWin::new(self);
             let pane = MuxPane(pane.pane_id());
 
@@ -3201,6 +3864,7 @@ impl TermWindow {
                 window: GuiWin,
                 pane: MuxPane,
                 link: String,
+                resolved_target: Option<FileLinkTarget>,
             ) -> anyhow::Result<()> {
                 let default_click = match lua {
                     Some(lua) => {
@@ -3215,18 +3879,127 @@ impl TermWindow {
                     None => true,
                 };
                 if default_click {
-                    log::info!("clicking {}", link);
-                    wezterm_open_url::open_url(&link);
+                    if let Some(target) = resolved_target {
+                        if target.path.exists() {
+                            log::info!(
+                                "Opening file path: {:?} line={:?} col={:?}",
+                                target.path,
+                                target.line,
+                                target.col
+                            );
+                            std::thread::spawn(move || {
+                                if target.path.is_file()
+                                    && TermWindow::try_open_file_in_vscode(&target).unwrap_or(false)
+                                {
+                                    return;
+                                }
+
+                                let mut cmd = std::process::Command::new("/usr/bin/open");
+                                if target.path.is_file() {
+                                    cmd.arg("-R");
+                                }
+                                cmd.arg(&target.path).status().ok();
+                            });
+                        } else {
+                            log::warn!("File does not exist: {:?}", target.path);
+                        }
+                    } else {
+                        log::info!("clicking {}", link);
+                        wezterm_open_url::open_url(&link);
+                    }
                 }
                 Ok(())
             }
 
             promise::spawn::spawn(config::with_lua_config_on_main_thread(move |lua| {
-                open_uri(lua, window, pane, link.uri().to_string())
+                open_uri(lua, window, pane, uri, resolved_target)
             }))
             .detach();
         }
     }
+
+    fn resolve_file_path(&self, pane: &Arc<dyn Pane>, uri: &str) -> Option<FileLinkTarget> {
+        let decoded_uri_path = url::Url::parse(uri)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .map(|path| path.to_string_lossy().into_owned());
+
+        let path_str = decoded_uri_path
+            .as_deref()
+            .unwrap_or_else(|| uri.strip_prefix("file://").unwrap_or(uri));
+        let (base_path, line, col) = Self::parse_file_location(path_str);
+
+        let path = if base_path.starts_with('/') {
+            Some(PathBuf::from(&base_path))
+        } else if base_path.starts_with("~/") {
+            dirs_next::home_dir().map(|home| home.join(&base_path[2..]))
+        } else {
+            pane.get_current_working_dir(CachePolicy::AllowStale)
+                .and_then(|url| url.to_file_path().ok())
+                .map(|cwd| cwd.join(&base_path))
+        }?;
+
+        Some(FileLinkTarget { path, line, col })
+    }
+
+    fn try_open_file_in_vscode(target: &FileLinkTarget) -> anyhow::Result<bool> {
+        let Some(line) = target.line else {
+            return Ok(false);
+        };
+
+        let mut location = format!("{}:{line}", target.path.display());
+        if let Some(col) = target.col {
+            location.push(':');
+            location.push_str(&col.to_string());
+        }
+
+        for candidate in VSCODE_OPEN_CANDIDATES {
+            let result = std::process::Command::new(candidate)
+                .arg("-g")
+                .arg(&location)
+                .status();
+
+            match result {
+                Ok(status) if status.success() => return Ok(true),
+                Ok(_) => return Ok(false),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn parse_file_location(path: &str) -> (String, Option<usize>, Option<usize>) {
+        let parts: Vec<&str> = path.rsplitn(3, ':').collect();
+
+        match parts.as_slice() {
+            [col_str, line_str, file_path]
+                if !col_str.is_empty()
+                    && !line_str.is_empty()
+                    && col_str.chars().all(|c| c.is_ascii_digit())
+                    && line_str.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                (
+                    file_path.to_string(),
+                    line_str.parse().ok(),
+                    col_str.parse().ok(),
+                )
+            }
+            _ => {
+                let parts: Vec<&str> = path.rsplitn(2, ':').collect();
+                match parts.as_slice() {
+                    [line_str, file_path]
+                        if !line_str.is_empty() && line_str.chars().all(|c| c.is_ascii_digit()) =>
+                    {
+                        (file_path.to_string(), line_str.parse().ok(), None)
+                    }
+                    _ => (path.to_string(), None, None),
+                }
+            }
+        }
+    }
+
     fn close_current_pane(&mut self, confirm: bool) {
         let mux_window_id = self.mux_window_id;
         let mux = Mux::get();
@@ -3291,7 +4064,12 @@ impl TermWindow {
         };
         let tab_id = tab.tab_id();
         let mux_window_id = self.mux_window_id;
+
         if confirm && !tab.can_close_without_prompting(CloseReason::Tab) {
+            // Tab has running processes; ask the user first.
+            // We do not record the cwd here: the user may cancel, and we cannot
+            // reliably hook the async confirmation result from this call site.
+            // In practice, tabs with active processes are rare to close with reopen-intent.
             let window = self.window.clone().unwrap();
             let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
                 confirm_close_tab(tab_id, term, mux_window_id, window)
@@ -3299,8 +4077,32 @@ impl TermWindow {
             self.assign_overlay(tab_id, overlay);
             promise::spawn::spawn(future).detach();
         } else {
+            // No confirmation needed: record cwd and close immediately.
+            if let Some(pane) = tab.get_active_pane() {
+                if let Some(cwd) = pane
+                    .get_current_working_dir(mux::pane::CachePolicy::AllowStale)
+                    .and_then(|url| url.to_file_path().ok())
+                {
+                    if cwd.is_absolute() {
+                        self.push_closed_tab_cwd(cwd);
+                    }
+                }
+            }
             mux.remove_tab(tab_id);
         }
+    }
+
+    /// Push a cwd onto this window's closed-tab history stack (max 10 entries).
+    fn push_closed_tab_cwd(&mut self, cwd: PathBuf) {
+        const MAX_CLOSED_TABS: usize = 10;
+        self.closed_tab_history.push_back(cwd);
+        if self.closed_tab_history.len() > MAX_CLOSED_TABS {
+            self.closed_tab_history.pop_front();
+        }
+    }
+
+    fn pop_closed_tab_cwd(&mut self) -> Option<PathBuf> {
+        self.closed_tab_history.pop_back()
     }
 
     pub fn pane_state(&self, pane_id: PaneId) -> RefMut<'_, PaneState> {
@@ -3390,18 +4192,23 @@ impl TermWindow {
     }
 
     fn scroll_to_top(&mut self, pane: &Arc<dyn Pane>) {
+        // Exit peek mode when scroll_to_top jumps to scrollback top
+        if pane.is_primary_peek() {
+            pane.set_primary_peek(false);
+        }
         let dims = pane.get_dimensions();
         self.set_viewport(pane.pane_id(), Some(dims.scrollback_top), dims);
     }
 
     fn scroll_to_bottom(&mut self, pane: &Arc<dyn Pane>) {
         self.pane_state(pane.pane_id()).viewport = None;
+        pane.set_primary_peek(false);
     }
 
     fn get_active_pane_no_overlay(&self) -> Option<Arc<dyn Pane>> {
         let mux = Mux::get();
-        mux.get_active_tab_for_window(self.mux_window_id)
-            .and_then(|tab| tab.get_active_pane())
+        let tab = mux.get_active_tab_for_window(self.mux_window_id)?;
+        tab.get_active_pane()
     }
 
     /// Returns a Pane that we can interact with; this will typically be
@@ -3643,5 +4450,46 @@ impl Drop for TermWindow {
                 fe.forget_known_window(&window);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TermWindow;
+
+    #[test]
+    fn config_changed_reload_requires_pane_to_belong_to_window() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            false
+        ));
+        assert!(TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            true
+        ));
+    }
+
+    #[test]
+    fn unrelated_user_var_never_triggers_config_reload() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "SOME_OTHER_USER_VAR",
+            true
+        ));
+    }
+
+    #[test]
+    fn parse_file_location_extracts_line_and_column() {
+        let (path, line, col) = TermWindow::parse_file_location("/tmp/demo.rs:12:34");
+        assert_eq!(path, "/tmp/demo.rs");
+        assert_eq!(line, Some(12));
+        assert_eq!(col, Some(34));
+    }
+
+    #[test]
+    fn parse_file_location_leaves_plain_paths_unchanged() {
+        let (path, line, col) = TermWindow::parse_file_location("/tmp/demo.rs");
+        assert_eq!(path, "/tmp/demo.rs");
+        assert_eq!(line, None);
+        assert_eq!(col, None);
     }
 }

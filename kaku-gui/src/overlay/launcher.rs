@@ -11,7 +11,10 @@ use crate::overlay::quickselect;
 use crate::overlay::selector::{matcher_pattern, matcher_score};
 use crate::termwindow::TermWindowNotif;
 use config::configuration;
-use config::keyassignment::{KeyAssignment, SpawnCommand, SpawnTabDomain};
+use config::keyassignment::KeyAssignment::SetPaneEncoding;
+use config::keyassignment::{
+    KeyAssignment, LauncherActionArgs, PaneEncoding, SpawnCommand, SpawnTabDomain,
+};
 use mux::domain::{DomainId, DomainState};
 use mux::pane::PaneId;
 use mux::termwiztermtab::TermWizTerminal;
@@ -136,7 +139,7 @@ impl LauncherArgs {
             for dom in domains.into_iter() {
                 let name = dom.domain_name();
                 let label = dom.domain_label().await;
-                let label = if name == label || label == "" {
+                let label = if name == label || label.is_empty() {
                     format!("domain `{}`", name)
                 } else {
                     format!("domain `{}` - {}", name, label)
@@ -171,6 +174,15 @@ impl LauncherArgs {
 
 const ROW_OVERHEAD: usize = 3;
 
+struct ParentLauncherState {
+    entries: Vec<Entry>,
+    active_idx: usize,
+    top_row: usize,
+    help_text: String,
+    filter_term: String,
+    filtering: bool,
+}
+
 struct LauncherState {
     active_idx: usize,
     max_items: usize,
@@ -187,6 +199,7 @@ struct LauncherState {
     alphabet: String,
     selection: String,
     always_fuzzy: bool,
+    parent_state: Option<ParentLauncherState>,
 }
 
 impl LauncherState {
@@ -228,6 +241,22 @@ impl LauncherState {
 
     fn build_entries(&mut self, args: LauncherArgs) {
         let config = configuration();
+
+        // Add a single "Pane Encoding" submenu entry as the very first item
+        // Only when NOT already viewing the encoding submenu
+        if !args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
+            self.entries.push(Entry {
+                label: "Pane Encoding".to_string(),
+                action: KeyAssignment::ShowLauncherArgs(LauncherActionArgs {
+                    flags: LauncherFlags::PANE_ENCODINGS,
+                    title: Some("Pane Encoding".to_string()),
+                    help_text: None,
+                    fuzzy_help_text: None,
+                    alphabet: None,
+                }),
+            });
+        }
+
         // Pull in the user defined entries from the launch_menu
         // section of the configuration.
         if args.flags.contains(LauncherFlags::LAUNCH_MENU_ITEMS) {
@@ -304,18 +333,33 @@ impl LauncherState {
             });
         }
 
+        if args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
+            for encoding in PaneEncoding::ordered_list() {
+                self.entries.push(Entry {
+                    label: format!("Set pane encoding to {encoding}"),
+                    action: SetPaneEncoding(encoding),
+                });
+            }
+        }
+
         if args.flags.contains(LauncherFlags::COMMANDS) {
             let commands = crate::commands::CommandDef::expanded_commands(&config);
             for cmd in commands {
                 if matches!(
                     &cmd.action,
-                    KeyAssignment::ActivateTabRelative(_) | KeyAssignment::ActivateTab(_)
+                    KeyAssignment::ActivateTabRelative(_)
+                        | KeyAssignment::ActivateTab(_)
+                        | KeyAssignment::SendString(_)
+                        | KeyAssignment::SendKey(_)
+                        | KeyAssignment::Nop
+                        | KeyAssignment::Multiple(_)
+                        | KeyAssignment::SetPaneEncoding(_)
                 ) {
                     // Filter out some noisy, repetitive entries
                     continue;
                 }
                 self.entries.push(Entry {
-                    label: format!("{}. {}", cmd.brief, cmd.doc),
+                    label: cmd.brief.to_string(),
                     action: cmd.action,
                 });
             }
@@ -330,7 +374,12 @@ impl LauncherState {
             for ((keycode, mods), entry) in keys {
                 if matches!(
                     &entry.action,
-                    KeyAssignment::ActivateTabRelative(_) | KeyAssignment::ActivateTab(_)
+                    KeyAssignment::ActivateTabRelative(_)
+                        | KeyAssignment::ActivateTab(_)
+                        | KeyAssignment::SendString(_)
+                        | KeyAssignment::SendKey(_)
+                        | KeyAssignment::Nop
+                        | KeyAssignment::Multiple(_)
                 ) {
                     // Filter out some noisy, repetitive entries
                     continue;
@@ -345,7 +394,7 @@ impl LauncherState {
                 }
 
                 let label = match derive_command_from_key_assignment(&entry.action) {
-                    Some(cmd) => format!("{}. {}", cmd.brief, cmd.doc),
+                    Some(cmd) => cmd.brief.to_string(),
                     None => format!(
                         "{:?} ({} {})",
                         entry.action,
@@ -353,7 +402,6 @@ impl LauncherState {
                         keycode.to_string().escape_debug()
                     ),
                 };
-
                 key_entries.push(Entry {
                     label,
                     action: entry.action,
@@ -397,6 +445,13 @@ impl LauncherState {
         let colors = &config.resolved_palette;
         let launcher_label_fg = colors.launcher_label_fg;
         let launcher_label_bg = colors.launcher_label_bg;
+        let selected_bg = colors
+            .ansi
+            .as_ref()
+            .map(|ansi| ansi[5])
+            .or_else(|| colors.brights.as_ref().map(|brights| brights[5]));
+        let selected_bg_attr =
+            selected_bg.map(|bg| ColorAttribute::from(config::ColorSpec::Color(bg)));
 
         for (row_num, (entry_idx, entry)) in self
             .filtered_entries
@@ -411,9 +466,19 @@ impl LauncherState {
 
             let mut attr = CellAttributes::blank();
 
+            let mut used_reverse_for_selection = false;
             if entry_idx == self.active_idx {
-                changes.push(AttributeChange::Reverse(true).into());
-                attr.set_reverse(true);
+                if let Some(selected_bg_attr) = selected_bg_attr {
+                    changes.push(AttributeChange::Background(selected_bg_attr).into());
+                    changes
+                        .push(AttributeChange::Foreground(ColorAttribute::PaletteIndex(15)).into());
+                    attr.set_background(selected_bg_attr)
+                        .set_foreground(ColorAttribute::PaletteIndex(15));
+                } else {
+                    changes.push(AttributeChange::Reverse(true).into());
+                    attr.set_reverse(true);
+                    used_reverse_for_selection = true;
+                }
             }
 
             // from above we know that row_num <= max_items
@@ -450,7 +515,7 @@ impl LauncherState {
             changes.append(&mut line.changes(&attr));
             changes.push(Change::Text(" ".to_string()));
 
-            if entry_idx == self.active_idx {
+            if used_reverse_for_selection {
                 changes.push(AttributeChange::Reverse(false).into());
             }
             changes.push(Change::AllAttributes(CellAttributes::default()));
@@ -474,18 +539,23 @@ impl LauncherState {
         term.render(&changes)
     }
 
-    fn launch(&self, active_idx: usize) -> bool {
-        if let Some(entry) = self.filtered_entries.get(active_idx) {
-            let assignment = entry.action.clone();
-            self.window.notify(TermWindowNotif::PerformAssignment {
-                pane_id: self.pane_id,
-                assignment,
-                tx: None,
-            });
-            true
-        } else {
-            false
+    fn launch(&mut self, active_idx: usize) -> bool {
+        let action = match self.filtered_entries.get(active_idx) {
+            Some(entry) => entry.action.clone(),
+            None => return false,
+        };
+        if let KeyAssignment::ShowLauncherArgs(ref args) = action {
+            if args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
+                self.enter_encoding_submenu();
+                return false;
+            }
         }
+        self.window.notify(TermWindowNotif::PerformAssignment {
+            pane_id: self.pane_id,
+            assignment: action,
+            tx: None,
+        });
+        true
     }
 
     fn move_up(&mut self) {
@@ -499,6 +569,48 @@ impl LauncherState {
         self.active_idx = (self.active_idx + 1).min(self.filtered_entries.len() - 1);
         if self.active_idx > self.top_row + self.max_items {
             self.top_row = self.active_idx.saturating_sub(self.max_items);
+        }
+    }
+
+    fn enter_encoding_submenu(&mut self) {
+        let parent = ParentLauncherState {
+            entries: std::mem::take(&mut self.entries),
+            active_idx: self.active_idx,
+            top_row: self.top_row,
+            help_text: self.help_text.clone(),
+            filter_term: std::mem::take(&mut self.filter_term),
+            filtering: self.filtering,
+        };
+        self.parent_state = Some(parent);
+        self.entries.clear();
+        for encoding in PaneEncoding::ordered_list() {
+            self.entries.push(Entry {
+                label: format!("Set pane encoding to {encoding}"),
+                action: SetPaneEncoding(encoding),
+            });
+        }
+        self.help_text =
+            "Select encoding  |  Enter = set  |  Esc = back  |  / = filter".to_string();
+        self.active_idx = 0;
+        self.top_row = 0;
+        self.filtering = false;
+        self.selection.clear();
+        self.update_filter();
+    }
+
+    fn exit_submenu(&mut self) -> bool {
+        if let Some(parent) = self.parent_state.take() {
+            self.entries = parent.entries;
+            self.active_idx = parent.active_idx;
+            self.top_row = parent.top_row;
+            self.help_text = parent.help_text;
+            self.filter_term = parent.filter_term;
+            self.filtering = parent.filtering;
+            self.selection.clear();
+            self.update_filter();
+            true
+        } else {
+            false
         }
     }
 
@@ -571,7 +683,9 @@ impl LauncherState {
                     key: KeyCode::Escape,
                     ..
                 }) => {
-                    break;
+                    if !self.exit_submenu() {
+                        break;
+                    }
                 }
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char(c),
@@ -622,10 +736,6 @@ impl LauncherState {
                             }
                         }
                     }
-                    if mouse_buttons != MouseButtons::NONE {
-                        // Treat any other mouse button as cancel
-                        break;
-                    }
                 }
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Enter,
@@ -667,6 +777,7 @@ pub fn launcher(
         selection: String::new(),
         alphabet: args.alphabet.clone(),
         always_fuzzy: filtering,
+        parent_state: None,
     };
 
     term.set_raw_mode()?;

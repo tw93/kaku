@@ -24,10 +24,15 @@ pub type SetupFunc = fn(&Lua) -> anyhow::Result<()>;
 
 lazy_static::lazy_static! {
     static ref SETUP_FUNCS: Mutex<Vec<SetupFunc>> = Mutex::new(vec![]);
+    static ref DEFERRED_SETUP_FUNCS: Mutex<Vec<SetupFunc>> = Mutex::new(vec![]);
 }
 
 pub fn add_context_setup_func(func: SetupFunc) {
     SETUP_FUNCS.lock().unwrap().push(func);
+}
+
+pub fn add_deferred_setup_func(func: SetupFunc) {
+    DEFERRED_SETUP_FUNCS.lock().unwrap().push(func);
 }
 
 pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
@@ -317,7 +322,7 @@ end
             )
             .context("set wezterm.config_dir")?;
 
-        lua.set_named_registry_value("wezterm-watch-paths", Vec::<String>::new())?;
+        lua.set_named_registry_value("kaku-watch-paths", Vec::<String>::new())?;
         wezterm_mod.set(
             "add_to_config_reload_watch_list",
             lua.create_function(add_to_config_reload_watch_list)?,
@@ -383,6 +388,47 @@ end
 
     for func in SETUP_FUNCS.lock().unwrap().iter() {
         func(&lua).context("calling SETUP_FUNCS")?;
+    }
+
+    // Install __index metamethod on the wezterm module that lazily runs
+    // deferred setup functions on first access to an unknown key.
+    {
+        let deferred = DEFERRED_SETUP_FUNCS.lock().unwrap().clone();
+        if !deferred.is_empty() {
+            let wezterm_mod = get_or_create_module(&lua, "wezterm")?;
+            let mt = wezterm_mod.get_metatable().unwrap_or_else(|| {
+                let mt = lua.create_table().unwrap();
+                wezterm_mod.set_metatable(Some(mt.clone()));
+                mt
+            });
+
+            // Store the deferred funcs as a Lua registry value so the closure
+            // can access them.
+            lua.set_named_registry_value(
+                "wezterm-deferred-setup",
+                lua.create_function({
+                    let deferred = deferred.clone();
+                    move |lua, (table, key): (mlua::Table, mlua::String)| {
+                        // Run all deferred setup functions once
+                        for func in &deferred {
+                            if let Err(err) = func(lua) {
+                                log::error!("deferred setup func error: {:#}", err);
+                            }
+                        }
+                        // Remove the __index metamethod so we don't re-trigger
+                        if let Some(mt) = table.get_metatable() {
+                            let _: mlua::Result<()> = mt.raw_set("__index", mlua::Value::Nil);
+                        }
+                        // Now look up the key again
+                        let val: mlua::Value = table.raw_get(key)?;
+                        Ok(val)
+                    }
+                })?,
+            )?;
+
+            let index_fn: mlua::Function = lua.named_registry_value("wezterm-deferred-setup")?;
+            mt.set("__index", index_fn)?;
+        }
     }
 
     Ok(lua)
@@ -675,7 +721,7 @@ fn exec_domain<'lua>(
         Some(_) => {
             return Err(mlua::Error::external(
                 "label function parameter must be either a string or a lua function",
-            ))
+            ));
         }
         None => None,
     };
@@ -768,8 +814,22 @@ pub async fn emit_event<'lua>(
     lua: &'lua Lua,
     (name, args): (String, mlua::MultiValue<'lua>),
 ) -> mlua::Result<bool> {
+    // Save previous value to support nested emit_event calls
+    let was_event: bool = lua.named_registry_value(IS_EVENT).unwrap_or(false);
     lua.set_named_registry_value(IS_EVENT, true)?;
 
+    let result = emit_event_inner(lua, name, args).await;
+
+    // Restore previous value
+    lua.set_named_registry_value(IS_EVENT, was_event)?;
+    result
+}
+
+async fn emit_event_inner<'lua>(
+    lua: &'lua Lua,
+    name: String,
+    args: mlua::MultiValue<'lua>,
+) -> mlua::Result<bool> {
     let decorated_name = format!("wezterm-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
     match tbl {
@@ -778,12 +838,9 @@ pub async fn emit_event<'lua>(
                 let func = func?;
                 match func.call_async(args.clone()).await? {
                     mlua::Value::Boolean(b) if !b => {
-                        // Default action prevented
                         return Ok(false);
                     }
-                    _ => {
-                        // Continue with other handlers
-                    }
+                    _ => {}
                 }
             }
             Ok(true)
@@ -856,9 +913,9 @@ pub fn add_to_config_reload_watch_list<'lua>(
     lua: &'lua Lua,
     args: Variadic<String>,
 ) -> mlua::Result<()> {
-    let mut watch_paths: Vec<String> = lua.named_registry_value("wezterm-watch-paths")?;
+    let mut watch_paths: Vec<String> = lua.named_registry_value("kaku-watch-paths")?;
     watch_paths.extend_from_slice(&args);
-    lua.set_named_registry_value("wezterm-watch-paths", watch_paths)?;
+    lua.set_named_registry_value("kaku-watch-paths", watch_paths)?;
     Ok(())
 }
 

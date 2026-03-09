@@ -1,13 +1,16 @@
 use crate::client::{ClientId, ClientInfo};
-use crate::pane::{CachePolicy, Pane, PaneId};
+use crate::pane::{CachePolicy, Pane, PaneId, PaneReader};
+use crate::pane_encoding::{decode_bytes_to_string, PaneOutputDecoder};
 use crate::ssh_agent::AgentProxy;
 use crate::tab::{SplitRequest, Tab, TabId};
 use crate::window::{Window, WindowId};
 use anyhow::{anyhow, Context, Error};
-use config::keyassignment::SpawnTabDomain;
+use config::keyassignment::{PaneEncoding, SpawnTabDomain};
 use config::{configuration, ExitBehavior, GuiPosition};
 use domain::{Domain, DomainId, DomainState, SplitSource};
-use filedescriptor::{poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLIN};
+use filedescriptor::{
+    poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLHUP, POLLIN,
+};
 #[cfg(unix)]
 use libc::{c_int, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
 use log::error;
@@ -39,6 +42,7 @@ pub mod connui;
 pub mod domain;
 pub mod localpane;
 pub mod pane;
+pub mod pane_encoding;
 pub mod renderable;
 pub mod ssh;
 pub mod ssh_agent;
@@ -71,7 +75,7 @@ pub enum MuxNotification {
     AssignClipboard {
         pane_id: PaneId,
         selection: ClipboardSelection,
-        clipboard: Option<String>,
+        clipboard: Option<Arc<str>>,
     },
     SaveToDownloads {
         name: Option<String>,
@@ -106,16 +110,20 @@ pub struct Mux {
     default_domain: RwLock<Option<Arc<dyn Domain>>>,
     domains: RwLock<HashMap<DomainId, Arc<dyn Domain>>>,
     domains_by_name: RwLock<HashMap<String, Arc<dyn Domain>>>,
-    subscribers: RwLock<HashMap<usize, Box<dyn Fn(MuxNotification) -> bool + Send + Sync>>>,
+    subscribers: RwLock<HashMap<usize, Arc<dyn Fn(MuxNotification) -> bool + Send + Sync>>>,
     banner: RwLock<Option<String>>,
     clients: RwLock<HashMap<ClientId, ClientInfo>>,
     identity: RwLock<Option<Arc<ClientId>>>,
     num_panes_by_workspace: RwLock<HashMap<String, usize>>,
     main_thread_id: std::thread::ThreadId,
     agent: Option<AgentProxy>,
+    /// Dead flags for pane reader threads, used to signal thread termination
+    pane_dead_flags: RwLock<HashMap<PaneId, Arc<AtomicBool>>>,
 }
 
-const BUFSIZE: usize = 1024 * 1024;
+// Reduced from 1MB to 256KB to lower per-pane memory overhead.
+// This affects read buffer and socketpair kernel buffers.
+const BUFSIZE: usize = 256 * 1024;
 
 /// This function applies parsed actions to the pane and notifies any
 /// mux subscribers about the output event
@@ -131,7 +139,7 @@ fn send_actions_to_mux(pane: &Weak<dyn Pane>, dead: &Arc<AtomicBool>, actions: V
             // Something else removed the pane from
             // the mux, so signal that we should stop
             // trying to process it in read_from_pane_pty.
-            dead.store(true, Ordering::Relaxed);
+            dead.store(true, Ordering::Release);
         }
     }
     histogram!("send_actions_to_mux.rate").record(1.);
@@ -147,13 +155,43 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     let mut deadline = None;
 
     loop {
-        match rx.read(&mut buf) {
-            Ok(size) if size == 0 => {
-                dead.store(true, Ordering::Relaxed);
+        // Check dead flag at the start of each iteration
+        if dead.load(Ordering::Acquire) {
+            log::trace!("parse_buffered_data: dead flag set, exiting");
+            break;
+        }
+
+        // Use poll with 200ms timeout to balance CPU overhead and close responsiveness.
+        // POLLHUP will wake us immediately when writer closes.
+        let mut pfd = [pollfd {
+            fd: rx.as_socket_descriptor(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        match poll(&mut pfd, Some(Duration::from_millis(200))) {
+            Ok(0) => {
+                // Timeout, loop back to check dead flag
+                continue;
+            }
+            Ok(_) if pfd[0].revents & POLLIN == 0 => {
+                // No data available (POLLHUP, POLLERR, etc.)
                 break;
             }
             Err(_) => {
-                dead.store(true, Ordering::Relaxed);
+                break;
+            }
+            Ok(_) => {
+                // Data available, proceed to read
+            }
+        }
+
+        match rx.read(&mut buf) {
+            Ok(size) if size == 0 => {
+                dead.store(true, Ordering::Release);
+                break;
+            }
+            Err(_) => {
+                dead.store(true, Ordering::Release);
                 break;
             }
             Ok(size) => {
@@ -279,13 +317,15 @@ fn allocate_socketpair() -> anyhow::Result<(FileDescriptor, FileDescriptor)> {
 fn read_from_pane_pty(
     pane: Weak<dyn Pane>,
     banner: Option<String>,
-    mut reader: Box<dyn std::io::Read>,
+    pane_reader: PaneReader,
+    dead: Arc<AtomicBool>,
 ) {
-    let mut buf = vec![0; BUFSIZE];
+    let mut reader = pane_reader.reader;
+    #[cfg(unix)]
+    let reader_fd = pane_reader.fd;
 
-    // This is used to signal that an error occurred either in this thread,
-    // or in the main mux thread.  If `true`, this thread will terminate.
-    let dead = Arc::new(AtomicBool::new(false));
+    let mut buf = vec![0; BUFSIZE];
+    let mut decoder = PaneOutputDecoder::default();
 
     let (pane_id, exit_behavior) = match pane.upgrade() {
         Some(pane) => (pane.pane_id(), pane.exit_behavior()),
@@ -307,16 +347,55 @@ fn read_from_pane_pty(
         }
     };
 
-    std::thread::spawn({
+    let parse_pane = pane.clone();
+    let parse_handle = std::thread::spawn({
         let dead = Arc::clone(&dead);
-        move || parse_buffered_data(pane, &dead, rx)
+        move || parse_buffered_data(parse_pane, &dead, rx)
     });
 
     if let Some(banner) = banner {
-        tx.write_all(banner.as_bytes()).ok();
+        if let Err(err) = tx.write_all(banner.as_bytes()) {
+            log::warn!("failed to write startup banner to pane parser: {err:#}");
+        }
     }
 
-    while !dead.load(Ordering::Relaxed) {
+    // Poll timeout in milliseconds. Using 200ms as a balance between
+    // responsiveness when closing panes and CPU overhead.
+    const POLL_TIMEOUT_MS: u64 = 200;
+
+    loop {
+        if dead.load(Ordering::Acquire) {
+            log::trace!("read_pty: dead flag set for pane {}", pane_id);
+            break;
+        }
+
+        // On Unix, poll before read to avoid blocking indefinitely.
+        // This allows the dead flag check to happen even if no data arrives.
+        // Note: Non-Unix platforms will block on read(); acceptable for macOS-only Kaku.
+        #[cfg(unix)]
+        if let Some(fd) = reader_fd {
+            let mut pfd = [pollfd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            }];
+            match poll(&mut pfd, Some(Duration::from_millis(POLL_TIMEOUT_MS))) {
+                Ok(0) => continue, // Timeout, check dead flag
+                Ok(_) if pfd[0].revents & POLLIN != 0 => {
+                    // Data available (possibly with POLLHUP), read it first
+                }
+                Ok(_) if pfd[0].revents & POLLHUP != 0 => {
+                    log::trace!("read_pty POLLHUP: pane_id {}", pane_id);
+                    break;
+                }
+                Err(e) => {
+                    error!("read_pty poll failed: pane {} {:?}", pane_id, e);
+                    break;
+                }
+                Ok(_) => continue, // No data and no hangup, check dead flag
+            }
+        }
+
         match reader.read(&mut buf) {
             Ok(size) if size == 0 => {
                 log::trace!("read_pty EOF: pane_id {}", pane_id);
@@ -329,7 +408,12 @@ fn read_from_pane_pty(
             Ok(size) => {
                 histogram!("read_from_pane_pty.bytes.rate").record(size as f64);
                 log::trace!("read_pty pane {pane_id} read {size} bytes");
-                if let Err(err) = tx.write_all(&buf[..size]) {
+                let decoded = if let Some(pane) = pane.upgrade() {
+                    decoder.decode(pane.get_encoding(), &buf[..size])
+                } else {
+                    buf[..size].to_vec()
+                };
+                if let Err(err) = tx.write_all(&decoded) {
                     error!(
                         "read_pty failed to write to parser: pane {} {:?}",
                         pane_id, err
@@ -360,7 +444,13 @@ fn read_from_pane_pty(
         }
     }
 
-    dead.store(true, Ordering::Relaxed);
+    dead.store(true, Ordering::Release);
+
+    // Close the write end to signal EOF to parse thread, then wait for it
+    drop(tx);
+    if let Err(e) = parse_handle.join() {
+        log::warn!("parse_buffered_data thread panicked: {:?}", e);
+    }
 }
 
 lazy_static::lazy_static! {
@@ -448,6 +538,7 @@ impl Mux {
             num_panes_by_workspace: RwLock::new(HashMap::new()),
             main_thread_id: std::thread::current().id(),
             agent,
+            pane_dead_flags: RwLock::new(HashMap::new()),
         }
     }
 
@@ -571,11 +662,7 @@ impl Mux {
     }
 
     pub fn iter_clients(&self) -> Vec<ClientInfo> {
-        self.clients
-            .read()
-            .values()
-            .map(|info| info.clone())
-            .collect()
+        self.clients.read().values().cloned().collect()
     }
 
     /// Returns a list of the unique workspace names known to the mux.
@@ -696,12 +783,37 @@ impl Mux {
         let sub_id = SUB_ID.fetch_add(1, Ordering::Relaxed);
         self.subscribers
             .write()
-            .insert(sub_id, Box::new(subscriber));
+            .insert(sub_id, Arc::new(subscriber));
     }
 
     pub fn notify(&self, notification: MuxNotification) {
-        let mut subscribers = self.subscribers.write();
-        subscribers.retain(|_, notify| notify(notification.clone()));
+        // Collect subscribers while holding the lock briefly
+        let subscribers: Vec<(usize, Arc<dyn Fn(MuxNotification) -> bool + Send + Sync>)> = self
+            .subscribers
+            .read()
+            .iter()
+            .map(|(k, v)| (*k, Arc::clone(v)))
+            .collect();
+
+        // Call subscribers outside the lock to avoid deadlock/reentrancy
+        let to_remove: Vec<usize> = subscribers
+            .into_iter()
+            .filter_map(|(sub_id, notify)| {
+                if !notify(notification.clone()) {
+                    Some(sub_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove unsubscribed callbacks
+        if !to_remove.is_empty() {
+            let mut subscribers = self.subscribers.write();
+            for sub_id in to_remove {
+                subscribers.remove(&sub_id);
+            }
+        }
     }
 
     pub fn notify_from_any_thread(notification: MuxNotification) {
@@ -788,8 +900,13 @@ impl Mux {
         let pane_id = pane.pane_id();
         if let Some(reader) = pane.reader()? {
             let banner = self.banner.read().clone();
-            let pane = Arc::downgrade(pane);
-            thread::spawn(move || read_from_pane_pty(pane, banner, reader));
+            let pane_weak = Arc::downgrade(pane);
+            // Create dead flag for this pane's reader threads and store it
+            let dead = Arc::new(AtomicBool::new(false));
+            self.pane_dead_flags
+                .write()
+                .insert(pane_id, Arc::clone(&dead));
+            thread::spawn(move || read_from_pane_pty(pane_weak, banner, reader, dead));
         }
         self.recompute_pane_count();
         self.notify(MuxNotification::PaneAdded(pane_id));
@@ -812,7 +929,15 @@ impl Mux {
     fn remove_pane_internal(&self, pane_id: PaneId) {
         log::debug!("removing pane {}", pane_id);
         let mut changed = false;
-        if let Some(pane) = self.panes.write().remove(&pane_id).clone() {
+
+        // Signal the pane's reader threads to terminate via dead flag.
+        // Threads will exit on their own when they check the flag.
+        if let Some(dead) = self.pane_dead_flags.write().remove(&pane_id) {
+            log::debug!("setting dead flag for pane {} reader threads", pane_id);
+            dead.store(true, Ordering::Release);
+        }
+
+        if let Some(pane) = self.panes.write().remove(&pane_id) {
             log::debug!("killing pane {}", pane_id);
             pane.kill();
             self.notify(MuxNotification::PaneRemoved(pane_id));
@@ -1131,7 +1256,7 @@ impl Mux {
                 None => self.default_domain(),
             },
             SpawnTabDomain::DomainId(domain_id) => self
-                .get_domain(*domain_id)
+                .get_domain(DomainId::from(*domain_id))
                 .ok_or_else(|| anyhow!("domain id {} is invalid", domain_id))?,
             SpawnTabDomain::DomainName(name) => {
                 self.get_domain_by_name(&name).ok_or_else(|| {
@@ -1157,31 +1282,36 @@ impl Mux {
         pane: Option<Arc<dyn Pane>>,
         target_domain: DomainId,
         policy: CachePolicy,
+        inherit_working_directory: bool,
     ) -> Option<String> {
-        command_dir.or_else(|| {
-            match pane {
-                Some(pane) if pane.domain_id() == target_domain => pane
-                    .get_current_working_dir(policy)
-                    .and_then(|url| {
-                        percent_decode_str(url.path())
-                            .decode_utf8()
-                            .ok()
-                            .map(|path| path.into_owned())
-                    })
-                    .map(|path| {
-                        // On Windows the file URI can produce a path like:
-                        // `/C:\Users` which is valid in a file URI, but the leading slash
-                        // is not liked by the windows file APIs, so we strip it off here.
-                        let bytes = path.as_bytes();
-                        if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
-                            path[1..].to_owned()
-                        } else {
-                            path
-                        }
-                    }),
-                _ => None,
-            }
-        })
+        if command_dir.is_some() {
+            return command_dir;
+        }
+
+        if !inherit_working_directory {
+            return None;
+        }
+
+        match pane {
+            Some(pane) if pane.domain_id() == target_domain => pane
+                .get_current_working_dir(policy)
+                .and_then(|url| {
+                    let raw_bytes: Vec<u8> = percent_decode_str(url.path()).collect();
+                    Some(decode_bytes_to_string(pane.get_encoding(), &raw_bytes))
+                })
+                .map(|path| {
+                    // On Windows the file URI can produce a path like:
+                    // `/C:\Users` which is valid in a file URI, but the leading slash
+                    // is not liked by the windows file APIs, so we strip it off here.
+                    let bytes = path.as_bytes();
+                    if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
+                        path[1..].to_owned()
+                    } else {
+                        path
+                    }
+                }),
+            _ => None,
+        }
     }
 
     pub async fn split_pane(
@@ -1208,6 +1338,7 @@ impl Mux {
             .get_pane(pane_id)
             .ok_or_else(|| anyhow!("pane_id {} is invalid", pane_id))?;
         let term_config = current_pane.get_config();
+        let config = configuration();
 
         let source = match source {
             SplitSource::Spawn {
@@ -1220,12 +1351,15 @@ impl Mux {
                     Some(Arc::clone(&current_pane)),
                     domain.domain_id(),
                     CachePolicy::FetchImmediate,
+                    config.split_pane_inherit_working_directory,
                 ),
             },
             other => other,
         };
 
-        let pane = domain.split_pane(source, tab_id, pane_id, request).await?;
+        let pane = domain
+            .split_pane(self, source, tab_id, pane_id, request)
+            .await?;
         if let Some(config) = term_config {
             pane.set_config(config);
         }
@@ -1310,6 +1444,7 @@ impl Mux {
         domain: SpawnTabDomain,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        encoding: Option<PaneEncoding>,
         size: TerminalSize,
         current_pane_id: Option<PaneId>,
         workspace_for_new_window: String,
@@ -1318,8 +1453,15 @@ impl Mux {
         let domain = self
             .resolve_spawn_tab_domain(current_pane_id, &domain)
             .context("resolve_spawn_tab_domain")?;
+        let is_new_window = window_id.is_none();
+        let config = configuration();
+        let inherit_working_directory = if is_new_window {
+            config.window_inherit_working_directory
+        } else {
+            config.tab_inherit_working_directory
+        };
 
-        let window_builder;
+        let mut window_builder;
         let term_config;
 
         let (window_id, size) = if let Some(window_id) = window_id {
@@ -1340,6 +1482,9 @@ impl Mux {
         } else {
             term_config = None;
             window_builder = self.new_empty_window(Some(workspace_for_new_window), window_position);
+            // Notify immediately so GUI can materialize the window while
+            // the shell/domain spawn work is still in progress.
+            window_builder.notify();
             (*window_builder, size)
         };
 
@@ -1366,10 +1511,18 @@ impl Mux {
             },
             domain.domain_id(),
             CachePolicy::FetchImmediate,
+            inherit_working_directory,
         );
 
         let tab = domain
-            .spawn(size, command.clone(), cwd.clone(), window_id)
+            .spawn(
+                self,
+                size,
+                command.clone(),
+                cwd.clone(),
+                encoding.unwrap_or_else(|| configuration().default_encoding),
+                window_id,
+            )
             .await
             .with_context(|| {
                 format!(
@@ -1446,7 +1599,7 @@ impl Clipboard for MuxClipboard {
         mux.notify(MuxNotification::AssignClipboard {
             pane_id: self.pane_id,
             selection,
-            clipboard,
+            clipboard: clipboard.map(|s| Arc::from(s.as_str())),
         });
         Ok(())
     }

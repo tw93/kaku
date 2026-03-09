@@ -7,25 +7,81 @@
 
 use crate::localpane::LocalPane;
 use crate::pane::{alloc_pane_id, Pane, PaneId};
+use crate::pane_encoding::PaneInputEncoder;
 use crate::tab::{SplitRequest, Tab, TabId};
 use crate::window::WindowId;
 use crate::Mux;
 use anyhow::{bail, Context, Error};
 use async_trait::async_trait;
-use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+use config::keyassignment::{PaneEncoding, SpawnCommand, SpawnTabDomain};
 use config::{configuration, ExecDomain, SerialDomain, ValueOrFunc, WslDomain};
 use downcast_rs::{impl_downcast, Downcast};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize, PtySystem};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use wezterm_term::TerminalSize;
 
 static DOMAIN_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
-pub type DomainId = usize;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DomainId(usize);
+
+impl DomainId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DomainId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for DomainId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<usize>().map(DomainId)
+    }
+}
+
+impl From<usize> for DomainId {
+    fn from(v: usize) -> Self {
+        Self(v)
+    }
+}
+impl From<DomainId> for usize {
+    fn from(v: DomainId) -> usize {
+        v.0
+    }
+}
+impl From<DomainId> for u64 {
+    fn from(v: DomainId) -> u64 {
+        v.0 as u64
+    }
+}
+impl std::convert::TryFrom<u64> for DomainId {
+    type Error = <usize as std::convert::TryFrom<u64>>::Error;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(DomainId)
+    }
+}
+impl std::convert::TryFrom<i64> for DomainId {
+    type Error = <usize as std::convert::TryFrom<i64>>::Error;
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(DomainId)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainState {
@@ -34,7 +90,7 @@ pub enum DomainState {
 }
 
 pub fn alloc_domain_id() -> DomainId {
-    DOMAIN_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
+    DomainId(DOMAIN_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,20 +107,21 @@ pub trait Domain: Downcast + Send + Sync {
     /// Spawn a new command within this domain
     async fn spawn(
         &self,
+        mux: &Mux,
         size: TerminalSize,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        encoding: PaneEncoding,
         window: WindowId,
     ) -> anyhow::Result<Arc<Tab>> {
         let pane = self
-            .spawn_pane(size, command, command_dir)
+            .spawn_pane(mux, size, command, command_dir, encoding)
             .await
             .context("spawn")?;
 
         let tab = Arc::new(Tab::new(&size));
         tab.assign_pane(&pane);
 
-        let mux = Mux::get();
         mux.add_tab_and_active_pane(&tab)?;
         mux.add_tab_to_window(&tab, window)?;
 
@@ -73,23 +130,23 @@ pub trait Domain: Downcast + Send + Sync {
 
     async fn split_pane(
         &self,
+        mux: &Mux,
         source: SplitSource,
         tab: TabId,
         pane_id: PaneId,
         split_request: SplitRequest,
     ) -> anyhow::Result<Arc<dyn Pane>> {
-        let mux = Mux::get();
         let tab = match mux.get_tab(tab) {
             Some(t) => t,
             None => anyhow::bail!("Invalid tab id {}", tab),
         };
 
-        let pane_index = match tab
+        let (pane_index, source_encoding) = match tab
             .iter_panes_ignoring_zoom()
             .iter()
             .find(|p| p.pane.pane_id() == pane_id)
         {
-            Some(p) => p.index,
+            Some(p) => (p.index, p.pane.get_encoding()),
             None => anyhow::bail!("invalid pane id {}", pane_id),
         };
 
@@ -103,8 +160,14 @@ pub trait Domain: Downcast + Send + Sync {
                 command,
                 command_dir,
             } => {
-                self.spawn_pane(split_size.second, command, command_dir)
-                    .await?
+                self.spawn_pane(
+                    mux,
+                    split_size.second,
+                    command,
+                    command_dir,
+                    source_encoding,
+                )
+                .await?
             }
             SplitSource::MovePane(src_pane_id) => {
                 let (_domain, _window, src_tab) = mux
@@ -143,9 +206,11 @@ pub trait Domain: Downcast + Send + Sync {
 
     async fn spawn_pane(
         &self,
+        mux: &Mux,
         size: TerminalSize,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>>;
 
     /// The mux will call this method on the domain of the pane that
@@ -333,6 +398,7 @@ impl LocalDomain {
                 args: if args.is_empty() { None } else { Some(args) },
                 set_environment_variables,
                 cwd,
+                encoding: None,
                 position: None,
             };
 
@@ -448,6 +514,7 @@ impl LocalDomain {
 
     async fn build_command(
         &self,
+        mux: &Mux,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
         pane_id: PaneId,
@@ -480,7 +547,7 @@ impl LocalDomain {
             cmd.env("WEZTERM_UNIX_SOCKET", sock);
         }
         cmd.env("WEZTERM_PANE", pane_id.to_string());
-        if let Some(agent) = Mux::get().agent.as_ref() {
+        if let Some(agent) = mux.agent.as_ref() {
             cmd.env("SSH_AUTH_SOCK", agent.path());
         }
         self.fixup_command(&mut cmd).await?;
@@ -496,19 +563,26 @@ impl LocalDomain {
 #[derive(Clone)]
 pub(crate) struct WriterWrapper {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    encoding: Arc<AtomicU8>,
+    input_encoder: Arc<Mutex<PaneInputEncoder>>,
 }
 
 impl WriterWrapper {
-    pub fn new(writer: Box<dyn Write + Send>) -> Self {
+    pub fn new(writer: Box<dyn Write + Send>, encoding: Arc<AtomicU8>) -> Self {
         Self {
             writer: Arc::new(Mutex::new(writer)),
+            encoding,
+            input_encoder: Arc::new(Mutex::new(PaneInputEncoder::default())),
         }
     }
 }
 
 impl std::io::Write for WriterWrapper {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.writer.lock().write(buf)
+        let encoding = PaneEncoding::from_u8(self.encoding.load(Ordering::Relaxed));
+        let encoded = self.input_encoder.lock().encode(encoding, buf);
+        self.writer.lock().write_all(&encoded)?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -589,13 +663,15 @@ impl portable_pty::ChildKiller for FailedProcessSpawn {
 impl Domain for LocalDomain {
     async fn spawn_pane(
         &self,
+        mux: &Mux,
         size: TerminalSize,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         let pane_id = alloc_pane_id();
         let cmd = self
-            .build_command(command, command_dir, pane_id)
+            .build_command(mux, command, command_dir, pane_id)
             .await
             .context("build_command")?;
         let pair = self
@@ -616,7 +692,8 @@ impl Domain for LocalDomain {
             self.name
         );
         let child_result = pair.slave.spawn_command(cmd);
-        let mut writer = WriterWrapper::new(pair.master.take_writer()?);
+        let encoding = Arc::new(AtomicU8::new(encoding.to_u8()));
+        let mut writer = WriterWrapper::new(pair.master.take_writer()?, Arc::clone(&encoding));
 
         let mut terminal = wezterm_term::Terminal::new(
             size,
@@ -637,11 +714,14 @@ impl Domain for LocalDomain {
                 pair.master,
                 Box::new(writer),
                 self.id,
+                encoding,
                 command_description,
             )),
             Err(err) => {
                 // Show the error to the user in the new pane
-                write!(writer, "{err:#}").ok();
+                if let Err(write_err) = write!(writer, "{err:#}") {
+                    log::warn!("failed to write process spawn error into pane: {write_err:#}");
+                }
 
                 // and return a dummy pane that has exited
                 Arc::new(LocalPane::new(
@@ -653,12 +733,12 @@ impl Domain for LocalDomain {
                     }),
                     Box::new(writer),
                     self.id,
+                    encoding,
                     command_description,
                 ))
             }
         };
 
-        let mux = Mux::get();
         mux.add_pane(&pane)?;
 
         Ok(pane)

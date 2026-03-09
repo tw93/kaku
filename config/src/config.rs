@@ -11,9 +11,10 @@ use crate::font::{
 };
 use crate::frontend::FrontEndSelection;
 use crate::keyassignment::{
-    KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, SpawnCommand,
+    KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, PaneEncoding,
+    SpawnCommand,
 };
-use crate::keys::{Key, LeaderKey, Mouse};
+use crate::keys::{DeferredKeyCode, Key, KeyNoAction, LeaderKey, Mouse};
 use crate::lua::make_lua_context;
 use crate::ssh::{SshBackend, SshDomain};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
@@ -25,14 +26,15 @@ use crate::{
     default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
-    CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
+    CONFIG_OVERRIDES, CONFIG_SKIP,
 };
 use anyhow::Context;
 use luahelper::impl_lua_conversion_dynamic;
 use mlua::FromLua;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::convert::TryFrom;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -224,6 +226,21 @@ pub struct Config {
     /// through configuration or OSC 7 (see docs for `default_cwd` for more
     /// info!)
     pub default_cwd: Option<PathBuf>,
+
+    /// When true, new windows inherit the cwd from the active pane if possible.
+    #[dynamic(default = "default_true")]
+    pub window_inherit_working_directory: bool,
+
+    /// When true, new tabs inherit the cwd from the active pane if possible.
+    #[dynamic(default = "default_true")]
+    pub tab_inherit_working_directory: bool,
+
+    /// When true, new split panes inherit the cwd from the source pane if possible.
+    #[dynamic(default = "default_true")]
+    pub split_pane_inherit_working_directory: bool,
+
+    #[dynamic(default = "default_pane_encoding")]
+    pub default_encoding: PaneEncoding,
 
     #[dynamic(default)]
     pub exit_behavior: ExitBehavior,
@@ -442,6 +459,11 @@ pub struct Config {
     pub mouse_bindings: Vec<Mouse>,
     #[dynamic(default)]
     pub disable_default_mouse_bindings: bool,
+    /// When false, completing a mouse text selection will not copy text
+    /// to the clipboard. Kaku may show a one-time in-window hint so the
+    /// selection behavior is less surprising.
+    #[dynamic(default = "default_true")]
+    pub copy_on_select: bool,
 
     #[dynamic(default)]
     pub daemon_options: DaemonOptions,
@@ -454,6 +476,11 @@ pub struct Config {
 
     #[dynamic(default = "default_macos_forward_mods")]
     pub macos_forward_to_ime_modifier_mask: Modifiers,
+
+    /// Global hotkey to show or hide Kaku on macOS.
+    /// Set this to nil to disable the system-wide hotkey.
+    #[dynamic(default = "default_macos_global_hotkey")]
+    pub macos_global_hotkey: Option<KeyNoAction>,
 
     #[dynamic(default)]
     pub treat_left_ctrlalt_as_altgr: bool,
@@ -537,6 +564,18 @@ pub struct Config {
     /// Controls the amount of padding to use around the terminal cell area
     #[dynamic(default)]
     pub window_padding: WindowPadding,
+
+    /// Number of extra cells of padding added on each side of a split line.
+    /// The split gutter width becomes `1 + 2 * split_pane_gap` cells.
+    /// A value of 2 gives ~40px visual breathing room at typical font sizes,
+    /// matching the outer window padding aesthetic without clipping content.
+    #[dynamic(default)]
+    pub split_pane_gap: u8,
+
+    /// The thickness of the split line in pixels.
+    /// Defaults to 2.0 pixels.
+    #[dynamic(default = "default_split_thickness")]
+    pub split_thickness: f32,
 
     #[dynamic(default)]
     pub window_content_alignment: WindowContentAlignment,
@@ -789,7 +828,7 @@ pub struct Config {
     #[dynamic(default = "default_stateless_process_list")]
     pub skip_close_confirmation_for_processes_named: Vec<String>,
 
-    #[dynamic(default = "default_true")]
+    #[dynamic(default = "default_quit_when_all_windows_are_closed")]
     pub quit_when_all_windows_are_closed: bool,
 
     #[dynamic(default = "default_true")]
@@ -835,6 +874,14 @@ pub struct Config {
 
     #[dynamic(default)]
     pub audible_bell: AudibleBell,
+
+    /// Show a dot indicator on inactive tabs with unread bell events
+    #[dynamic(default = "default_true")]
+    pub bell_tab_indicator: bool,
+
+    /// Show a badge on the Dock icon when bell fires in unfocused window
+    #[dynamic(default)]
+    pub bell_dock_badge: bool,
 
     #[dynamic(default)]
     pub canonicalize_pasted_newlines: Option<NewlineCanon>,
@@ -1006,7 +1053,7 @@ impl Config {
         // multiple.  In addition, it spawns a lot of subprocesses,
         // so we do this bit "by-hand"
 
-        let mut paths = vec![PathPossibility::optional(HOME_DIR.join(".kaku.lua"))];
+        let mut paths = vec![];
         for dir in CONFIG_DIRS.iter() {
             paths.push(PathPossibility::optional(dir.join("kaku.lua")))
         }
@@ -1030,17 +1077,11 @@ impl Config {
         if cfg!(target_os = "macos") {
             if let Ok(exe_name) = std::env::current_exe() {
                 if let Some(contents_dir) = exe_name.parent().and_then(|p| p.parent()) {
-                    paths.insert(
-                        0,
-                        PathPossibility::optional(contents_dir.join("Resources").join("kaku.lua")),
-                    );
+                    paths.push(PathPossibility::optional(
+                        contents_dir.join("Resources").join("kaku.lua"),
+                    ));
                 }
             }
-        }
-
-        if let Some(path) = std::env::var_os("KAKU_CONFIG_FILE") {
-            log::trace!("Note: KAKU_CONFIG_FILE is set in the environment");
-            paths.insert(0, PathPossibility::required(path.into()));
         }
 
         if let Some(path) = CONFIG_FILE_OVERRIDE.lock().unwrap().as_ref() {
@@ -1060,7 +1101,7 @@ impl Config {
                         file_name: Some(path_item.path.clone()),
                         lua: None,
                         warnings: vec![],
-                    }
+                    };
                 }
                 Ok(None) => continue,
                 Ok(Some(loaded)) => return loaded,
@@ -1090,12 +1131,126 @@ impl Config {
                 Ok(default_config_with_overrides_applied()?.compute_extra_defaults(None))
             });
 
-        Ok(LoadedConfig {
+        let loaded = LoadedConfig {
             config: Ok(config?),
             file_name: None,
             lua: Some(make_lua_context(Path::new(""))?),
             warnings,
-        })
+        };
+        Ok(loaded)
+    }
+
+    /// Runtime signature embedded in every cache entry.
+    /// Changing the Kaku version automatically invalidates all cached bytecode,
+    /// preventing cross-version mismatches.
+    const CACHE_SIGNATURE: &'static str = concat!("kaku/", env!("CARGO_PKG_VERSION"), "/lua54");
+
+    /// Magic header for the bytecode cache file format.
+    const CACHE_MAGIC: &'static [u8; 4] = b"KLBC";
+
+    /// Compute the bytecode cache path for a given config source file.
+    fn bytecode_cache_path(source: &Path) -> PathBuf {
+        // Use a stable hash of the source path to avoid collisions.
+        // SipHasher24 is version-stable, unlike DefaultHasher.
+        let hash = {
+            use siphasher::sip::SipHasher24;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = SipHasher24::new();
+            source.hash(&mut hasher);
+            hasher.finish()
+        };
+        crate::CACHE_DIR.join(format!("lua_bytecode_{:016x}.bin", hash))
+    }
+
+    /// Hash the content of a source file for cache validation.
+    fn source_content_hash(content: &[u8]) -> u64 {
+        use siphasher::sip::SipHasher24;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = SipHasher24::new();
+        content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Encode bytecode with a validation header:
+    ///   MAGIC(4) | SIG_LEN(2 LE) | SIGNATURE(SIG_LEN) | SRC_HASH(8 LE) | BYTECODE
+    fn encode_cache(source_content: &[u8], bytecode: &[u8]) -> Vec<u8> {
+        let sig = Self::CACHE_SIGNATURE.as_bytes();
+        let sig_len = sig.len() as u16;
+        let src_hash = Self::source_content_hash(source_content);
+
+        let mut buf = Vec::with_capacity(4 + 2 + sig.len() + 8 + bytecode.len());
+        buf.extend_from_slice(Self::CACHE_MAGIC);
+        buf.extend_from_slice(&sig_len.to_le_bytes());
+        buf.extend_from_slice(sig);
+        buf.extend_from_slice(&src_hash.to_le_bytes());
+        buf.extend_from_slice(bytecode);
+        buf
+    }
+
+    /// Decode and validate cache header; returns raw bytecode on success.
+    fn decode_cache(source_content: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+        // Parse magic
+        if data.get(..4) != Some(Self::CACHE_MAGIC) {
+            log::trace!("bytecode cache: bad magic, invalidating");
+            return None;
+        }
+        let data = &data[4..];
+
+        // Parse signature length + value
+        if data.len() < 2 {
+            return None;
+        }
+        let sig_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        let data = &data[2..];
+        if data.len() < sig_len {
+            return None;
+        }
+        let cached_sig = &data[..sig_len];
+        if cached_sig != Self::CACHE_SIGNATURE.as_bytes() {
+            log::trace!("bytecode cache: signature mismatch, invalidating");
+            return None;
+        }
+        let data = &data[sig_len..];
+
+        // Parse source content hash
+        if data.len() < 8 {
+            return None;
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&data[..8]);
+        let cached_hash = u64::from_le_bytes(hash_bytes);
+        let expected_hash = Self::source_content_hash(source_content);
+        if cached_hash != expected_hash {
+            log::trace!("bytecode cache: source hash mismatch, invalidating");
+            return None;
+        }
+
+        Some(data[8..].to_vec())
+    }
+
+    /// Try to load bytecode from cache, validating header + source hash.
+    fn try_load_bytecode_cache(source: &Path, source_content: &[u8]) -> Option<Vec<u8>> {
+        let cache_path = Self::bytecode_cache_path(source);
+        // Quick mtime guard: skip reading the file if source is newer
+        let source_mtime = std::fs::metadata(source).ok()?.modified().ok()?;
+        let cache_mtime = std::fs::metadata(&cache_path).ok()?.modified().ok()?;
+        if cache_mtime <= source_mtime {
+            return None;
+        }
+        let data = std::fs::read(&cache_path).ok()?;
+        Self::decode_cache(source_content, &data)
+    }
+
+    /// Save compiled bytecode to the cache with validation header.
+    fn save_bytecode_cache(source: &Path, source_content: &[u8], bytecode: &[u8]) {
+        let cache_path = Self::bytecode_cache_path(source);
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let encoded = Self::encode_cache(source_content, bytecode);
+        if let Err(err) = std::fs::write(&cache_path, &encoded) {
+            log::trace!("failed to write bytecode cache: {:#}", err);
+        }
     }
 
     fn try_load(
@@ -1116,31 +1271,80 @@ impl Config {
         file.read_to_string(&mut s)?;
         let lua = make_lua_context(p)?;
 
+        // Try loading from bytecode cache first
+        let source_bytes = s.as_bytes();
+        let cached_bytecode = Self::try_load_bytecode_cache(p, source_bytes);
+
         let (config, warnings) =
             wezterm_dynamic::Error::capture_warnings(|| -> anyhow::Result<Config> {
-                let cfg: Config;
+                let source_text = s.trim_start_matches('\u{FEFF}');
 
-                let config: mlua::Value = smol::block_on(
-                    // Skip a potential BOM that Windows software may have placed in the
-                    // file. Note that we can't catch this happening for files that are
-                    // imported via the lua require function.
-                    lua.load(s.trim_start_matches('\u{FEFF}'))
+                let map_lua_err = |e: mlua::Error| -> anyhow::Error {
+                    let err_str = format!("{}", e);
+                    if err_str.contains("attempt to index a nil value")
+                        && err_str.contains("global 'config'")
+                    {
+                        anyhow::anyhow!(
+                            "Config error: You may have forgotten to define the config variable.\n\
+                             \n\
+                             In kaku.lua, you need to create the config table first:\n\
+                             \n\
+                             local wezterm = require 'wezterm'\n\
+                             local config = {{}}  -- or wezterm.config_builder()\n\
+                             \n\
+                             config.line_height = 1.2\n\
+                             config.font_size = 14.0\n\
+                             \n\
+                             return config\n\
+                             \n\
+                             Original error: {}",
+                            e
+                        )
+                    } else {
+                        anyhow::anyhow!("{}", e)
+                    }
+                };
+
+                let config: mlua::Value = if let Some(ref bytecode) = cached_bytecode {
+                    match smol::block_on(
+                        lua.load(bytecode.as_slice())
+                            .set_name(p.to_string_lossy())
+                            .eval_async::<mlua::Value>(),
+                    ) {
+                        Ok(val) => val,
+                        Err(_) => {
+                            // Cache is corrupt or incompatible, fall back to source
+                            log::trace!("bytecode cache miss, loading from source");
+                            smol::block_on(
+                                lua.load(source_text)
+                                    .set_name(p.to_string_lossy())
+                                    .eval_async::<mlua::Value>(),
+                            )
+                            .map_err(&map_lua_err)?
+                        }
+                    }
+                } else {
+                    // No cache, load from source and dump bytecode for next time.
+                    // Compile to a function first so we can extract bytecode.
+                    let func = lua
+                        .load(source_text)
                         .set_name(p.to_string_lossy())
-                        .eval_async(),
-                )?;
+                        .into_function()
+                        .map_err(&map_lua_err)?;
+                    let bytecode = func.dump(true);
+                    Self::save_bytecode_cache(p, source_bytes, &bytecode);
+                    smol::block_on(func.call_async::<_, mlua::Value>(())).map_err(&map_lua_err)?
+                };
+
                 let config = Config::apply_overrides_to(&lua, config)?;
                 let config = Config::apply_overrides_obj_to(&lua, config, overrides)?;
-                cfg = Config::from_lua(config, &lua).with_context(|| {
+                let cfg = Config::from_lua(config, &lua).with_context(|| {
                     format!(
                         "Error converting lua value returned by script {} to Config struct",
                         p.display()
                     )
                 })?;
                 cfg.check_consistency()?;
-
-                // Compute but discard the key bindings here so that we raise any
-                // problems earlier than we use them.
-                let _ = cfg.key_bindings();
 
                 std::env::set_var("KAKU_CONFIG_FILE", p);
                 if let Some(dir) = p.parent() {
@@ -1149,9 +1353,10 @@ impl Config {
                 Ok(cfg)
             });
         let cfg = config?;
+        let cfg = cfg.compute_extra_defaults(Some(p));
 
         Ok(Some(LoadedConfig {
-            config: Ok(cfg.compute_extra_defaults(Some(p))),
+            config: Ok(cfg),
             file_name: Some(p.to_path_buf()),
             lua: Some(lua),
             warnings,
@@ -1389,9 +1594,20 @@ impl Config {
             ..Default::default()
         });
 
-        // Load any additional color schemes into the color_schemes map
-        cfg.load_color_schemes(&cfg.compute_color_scheme_dirs())
-            .ok();
+        // Only scan color scheme directories from disk when the user
+        // references a scheme not already defined inline.  This avoids
+        // directory enumeration + TOML parsing on every startup for users
+        // who don't use custom .toml color scheme files.
+        if let Some(scheme_name) = cfg.color_scheme.clone() {
+            if !cfg.color_schemes.contains_key(scheme_name.as_str()) {
+                let dirs = cfg.compute_color_scheme_dirs();
+                // Fast path: try to load just the matching .toml file by name
+                // before falling back to a full directory scan.
+                if !cfg.try_load_single_color_scheme(&scheme_name, &dirs) {
+                    cfg.load_color_schemes(&dirs).ok();
+                }
+            }
+        }
 
         if let Some(scheme) = cfg.color_scheme.as_ref() {
             match cfg.resolve_color_scheme() {
@@ -1433,6 +1649,40 @@ impl Config {
             }
         }
         paths
+    }
+
+    /// Try to load a single color scheme by name from the given directories.
+    /// Returns true if the scheme was found and loaded.
+    fn try_load_single_color_scheme(&mut self, scheme_name: &str, paths: &[PathBuf]) -> bool {
+        let file_name = format!("{}.toml", scheme_name);
+        for dir in paths {
+            let path = dir.join(&file_name);
+            if path.is_file() {
+                match std::fs::read_to_string(&path)
+                    .context("reading color scheme")
+                    .and_then(|s| ColorSchemeFile::from_toml_str(&s).context("parsing TOML"))
+                {
+                    Ok(scheme) => {
+                        let name = scheme
+                            .metadata
+                            .name
+                            .unwrap_or_else(|| scheme_name.to_string());
+                        self.color_schemes.insert(name, scheme.colors);
+                        if self.color_schemes.contains_key(scheme_name) {
+                            return true;
+                        }
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "Color scheme in `{}` failed to load: {:#}",
+                            path.display(),
+                            err
+                        );
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn load_color_schemes(&mut self, paths: &[PathBuf]) -> anyhow::Result<()> {
@@ -1608,6 +1858,15 @@ impl Config {
         #[cfg(unix)]
         cmd.umask(umask::UmaskSaver::saved_umask());
         cmd.env("TERM", &self.term);
+        if self.term == "kaku" {
+            if let Some(terminfo_dir) = bundled_terminfo_dir() {
+                if let Some(terminfo_dirs) =
+                    merged_terminfo_dirs(std::env::var_os("TERMINFO_DIRS"), &terminfo_dir)
+                {
+                    cmd.env("TERMINFO_DIRS", terminfo_dirs);
+                }
+            }
+        }
         cmd.env("COLORTERM", "truecolor");
         // TERM_PROGRAM and TERM_PROGRAM_VERSION are an emerging
         // de-facto standard for identifying the terminal.
@@ -1630,6 +1889,10 @@ fn default_pane_select_bg_color() -> RgbaColor {
 
 fn default_pane_select_font_size() -> f64 {
     36.0
+}
+
+fn default_split_thickness() -> f32 {
+    2.0
 }
 
 fn default_integrated_title_buttons() -> Vec<IntegratedTitleButton> {
@@ -1731,6 +1994,9 @@ pub fn default_hyperlink_rules() -> Vec<hyperlink::Rule> {
         hyperlink::Rule::new(hyperlink::GENERIC_HYPERLINK_PATTERN, "$0").unwrap(),
         // implicit mailto link
         hyperlink::Rule::new(r"\b\w+@[\w-]+(\.[\w-]+)+\b", "mailto:$0").unwrap(),
+        // File paths: must start with /, ~/, ./ or ../
+        // Supports file:line and file:line:col formats
+        hyperlink::Rule::new(r"(?:~|\.\.?)?/[^\s\)\]\}>]+", "file://$0").unwrap(),
     ]
 }
 
@@ -1742,7 +2008,38 @@ fn default_harfbuzz_features() -> Vec<String> {
 }
 
 fn default_term() -> String {
+    // WezTerm sets `wezterm` here, but `kaku` causes SSH issues since its
+    // terminfo doesn't exist on remote servers. So we default to `xterm-256color`.
     "xterm-256color".into()
+}
+
+fn bundled_terminfo_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    if let Ok(exe_name) = std::env::current_exe() {
+        if let Some(contents_dir) = exe_name.parent().and_then(|p| p.parent()) {
+            let terminfo_dir = contents_dir.join("Resources").join("terminfo");
+            if terminfo_dir.is_dir() {
+                return Some(terminfo_dir);
+            }
+        }
+    }
+
+    None
+}
+
+fn merged_terminfo_dirs(existing: Option<OsString>, first: &Path) -> Option<OsString> {
+    let mut paths = vec![first.to_path_buf()];
+    if let Some(existing) = existing {
+        for path in std::env::split_paths(&existing) {
+            if path != first {
+                paths.push(path);
+            }
+        }
+    }
+    std::env::join_paths(paths).ok()
 }
 
 fn default_font_size() -> f64 {
@@ -1797,9 +2094,13 @@ fn default_gui_startup_args() -> Vec<String> {
     vec!["start".to_string()]
 }
 
+fn default_pane_encoding() -> PaneEncoding {
+    PaneEncoding::Utf8
+}
+
 // Coupled with term/src/config.rs:TerminalConfiguration::unicode_version
 fn default_unicode_version() -> u8 {
-    9
+    14
 }
 
 fn default_mux_env_remove() -> Vec<String> {
@@ -1855,6 +2156,17 @@ fn default_status_update_interval() -> u64 {
     1_000
 }
 
+fn default_quit_when_all_windows_are_closed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 fn default_alternate_buffer_wheel_scroll_speed() -> u8 {
     3
 }
@@ -1881,10 +2193,16 @@ fn default_tab_max_width() -> usize {
 }
 
 fn default_update_interval() -> u64 {
-    86400
+    10800
 }
 
 fn default_prefer_egl() -> bool {
+    // MetalANGLE via EGL is the preferred path on macOS in general, but
+    // older Intel Macs can abort during startup inside the bundled ANGLE
+    // stack. Keep EGL opt-in there and preserve the safer CGL fallback.
+    if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        return false;
+    }
     !cfg!(windows)
 }
 
@@ -1898,12 +2216,12 @@ fn default_inactive_pane_hsb() -> HsbTransform {
 
 #[derive(FromDynamic, ToDynamic, Clone, Copy, Debug, Default)]
 pub enum DefaultCursorStyle {
-    BlinkingBlock,
     #[default]
+    BlinkingBar,
+    BlinkingBlock,
     SteadyBlock,
     BlinkingUnderline,
     SteadyUnderline,
-    BlinkingBar,
     SteadyBar,
 }
 
@@ -2196,6 +2514,13 @@ pub(crate) fn validate_domain_name(name: &str) -> Result<(), String> {
 /// <https://github.com/wezterm/wezterm/issues/2630>
 fn default_macos_forward_mods() -> Modifiers {
     Modifiers::SHIFT
+}
+
+fn default_macos_global_hotkey() -> Option<KeyNoAction> {
+    Some(KeyNoAction {
+        key: DeferredKeyCode::try_from("K").expect("default global hotkey key to parse"),
+        mods: Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER,
+    })
 }
 
 fn default_colr_rasterizer() -> FontRasterizerSelection {

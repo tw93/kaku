@@ -9,7 +9,7 @@ use config::keyassignment::ScrollbackEraseMode;
 use mux::domain::DomainId;
 use mux::pane::{
     alloc_pane_id, CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId,
-    Pattern, SearchResult, WithPaneLines,
+    PaneReader, Pattern, SearchResult, WithPaneLines,
 };
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
@@ -236,7 +236,7 @@ impl ClientPane {
         Ok(())
     }
 
-    pub fn remote_pane_id(&self) -> TabId {
+    pub fn remote_pane_id(&self) -> PaneId {
         self.remote_pane_id
     }
 
@@ -353,7 +353,7 @@ impl Pane for ClientPane {
         Ok(())
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
         Ok(None)
     }
 
@@ -643,7 +643,7 @@ impl Pane for ClientPane {
 
 struct PaneWriter {
     client: Arc<ClientInner>,
-    remote_pane_id: TabId,
+    remote_pane_id: PaneId,
 }
 
 impl std::io::Write for PaneWriter {

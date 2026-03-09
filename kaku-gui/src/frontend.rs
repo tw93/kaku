@@ -4,7 +4,7 @@ use crate::termwindow::TermWindowNotif;
 use crate::TermWindow;
 use ::window::*;
 use anyhow::{Context, Error};
-use config::keyassignment::{KeyAssignment, SpawnCommand};
+use config::keyassignment::{KeyAssignment, SpawnCommand, SpawnTabDomain};
 use config::{ConfigSubscription, NotificationHandling};
 use mux::client::ClientId;
 use mux::window::WindowId as MuxWindowId;
@@ -12,11 +12,13 @@ use mux::{Mux, MuxNotification};
 use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
-use std::convert::TryInto;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wezterm_term::{Alert, ClipboardSelection};
 use wezterm_toast_notification::*;
+
+pub const SET_DEFAULT_TERMINAL_EVENT: &str = "set-default-terminal";
 
 pub struct GuiFrontEnd {
     connection: Rc<Connection>,
@@ -25,6 +27,8 @@ pub struct GuiFrontEnd {
     known_windows: RefCell<BTreeMap<Window, MuxWindowId>>,
     client_id: Arc<ClientId>,
     config_subscription: RefCell<Option<ConfigSubscription>>,
+    /// Global count of unread bell events across all windows
+    unread_bell_count: RefCell<usize>,
 }
 
 impl Drop for GuiFrontEnd {
@@ -33,82 +37,227 @@ impl Drop for GuiFrontEnd {
     }
 }
 
-pub fn check_for_updates() {
-    std::thread::spawn(move || {
-        log::info!("Checking for updates...");
-        let url = "https://api.github.com/repos/tw93/Kaku/releases/latest";
-        let mut writer = Vec::new();
+lazy_static::lazy_static! {
+    static ref FAST_CONFIG_SNAPSHOT: Mutex<Option<config::ConfigHandle>> = Mutex::new(None);
+}
 
-        let res = http_req::request::Request::new(&url.try_into().unwrap())
-            .header("User-Agent", "Kaku-Terminal")
-            .send(&mut writer);
+fn fast_config_snapshot() -> config::ConfigHandle {
+    if let Some(cfg) = FAST_CONFIG_SNAPSHOT.lock().unwrap().as_ref().cloned() {
+        return cfg;
+    }
+    let cfg = config::configuration();
+    FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg.clone());
+    cfg
+}
 
-        match res {
-            Ok(resp) => {
-                if resp.status_code().is_success() {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&writer) {
-                        if let Some(tag_name) = json.get("tag_name").and_then(|v| v.as_str()) {
-                            let current_version = config::wezterm_version();
-                            let latest_version =
-                                tag_name.trim_start_matches(|c| c == 'v' || c == 'V');
-                            let release_url = json
-                                .get("html_url")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("https://github.com/tw93/Kaku/releases/latest")
-                                .to_string();
+pub(crate) fn refresh_fast_config_snapshot() {
+    let cfg = config::configuration();
+    FAST_CONFIG_SNAPSHOT.lock().unwrap().replace(cfg);
+}
 
-                            if latest_version != current_version {
-                                let message = format!(
-                                    "A new version {} is available and you are using {}.\n\nPlease download the latest version manually.",
-                                    latest_version, current_version
-                                );
+fn resolve_bundled_kaku_bin() -> anyhow::Result<PathBuf> {
+    fn add_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+        if !candidates.iter().any(|p| p == &path) {
+            candidates.push(path);
+        }
+    }
 
-                                promise::spawn::spawn_into_main_thread(async move {
-                                    if let Some(conn) = Connection::get() {
-                                        if conn.confirm(
-                                            "Check for Updates",
-                                            &message,
-                                            "Go to Release",
-                                        ) {
-                                            wezterm_open_url::open_url(&release_url);
-                                        }
-                                    }
-                                })
-                                .detach();
-                            } else {
-                                let message = format!(
-                                    "You are using the latest version {}.",
-                                    current_version
-                                );
-                                promise::spawn::spawn_into_main_thread(async move {
-                                    if let Some(conn) = Connection::get() {
-                                        conn.alert("Check for Updates", &message);
-                                    }
-                                })
-                                .detach();
-                            }
-                        }
-                    }
+    let mut candidates = Vec::new();
+
+    if let Some(path) = std::env::var_os("KAKU_BIN") {
+        add_candidate(&mut candidates, PathBuf::from(path));
+    }
+
+    let current_exe = std::env::current_exe().context("resolve executable path")?;
+    if let Some(parent) = current_exe.parent() {
+        add_candidate(&mut candidates, parent.join("kaku"));
+    }
+
+    if let Ok(resolved_exe) = std::fs::canonicalize(&current_exe) {
+        if let Some(parent) = resolved_exe.parent() {
+            add_candidate(&mut candidates, parent.join("kaku"));
+        }
+    }
+
+    add_candidate(
+        &mut candidates,
+        config::HOME_DIR
+            .join(".config")
+            .join("kaku")
+            .join("zsh")
+            .join("bin")
+            .join("kaku"),
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        add_candidate(
+            &mut candidates,
+            PathBuf::from("/Applications/Kaku.app/Contents/MacOS/kaku"),
+        );
+        add_candidate(
+            &mut candidates,
+            config::HOME_DIR
+                .join("Applications")
+                .join("Kaku.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("kaku"),
+        );
+    }
+
+    if let Some(path) = candidates.iter().find(|path| path.exists()) {
+        return Ok(path.clone());
+    }
+
+    anyhow::bail!(
+        "could not find kaku binary; checked: {}",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+pub(crate) fn kaku_cli_program_for_spawn() -> String {
+    match resolve_bundled_kaku_bin() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(err) => {
+            // Finder-launched apps can have a minimal PATH; fall back only when
+            // we cannot resolve the bundled companion binary.
+            log::warn!("Falling back to PATH lookup for `kaku`: {err:#}");
+            "kaku".to_string()
+        }
+    }
+}
+
+pub fn open_kaku_config() {
+    let kaku_bin = kaku_cli_program_for_spawn();
+
+    promise::spawn::spawn_into_main_thread(async move {
+        let config = fast_config_snapshot();
+        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+        let size = config.initial_size(dpi as u32, None);
+        let term_config = Arc::new(config::TermConfig::with_config(config));
+        crate::spawn::spawn_command_impl(
+            &SpawnCommand {
+                domain: SpawnTabDomain::DomainName("local".to_string()),
+                args: Some(vec![kaku_bin, "config".to_string()]),
+                ..Default::default()
+            },
+            SpawnWhere::NewTab,
+            size,
+            None,
+            term_config,
+        );
+    })
+    .detach();
+}
+
+pub fn run_kaku_update_from_menu() {
+    // Run through the user's shell so rc-initialized env is available.
+    // This keeps menu-triggered update behavior consistent with typing
+    // `kaku update` in a normal shell tab.
+    run_kaku_subcommand_in_shell_new_window("update");
+}
+
+fn run_kaku_subcommand_in_shell_new_window(subcommand: &str) {
+    let subcommand = subcommand.to_string();
+    let kaku_bin = kaku_cli_program_for_spawn();
+    let fallback_bin = shlex::try_quote(&kaku_bin)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| kaku_bin.clone());
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let shell_name = Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let command_str = if shell_name == "fish" {
+        format!(
+            "kaku {subcommand}; or {fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read -l dummy"
+        )
+    } else {
+        format!(
+            "kaku {subcommand} || {fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read dummy"
+        )
+    };
+
+    promise::spawn::spawn_into_main_thread(async move {
+        use crate::spawn::SpawnWhere;
+        use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+        use std::sync::Arc;
+
+        let config = fast_config_snapshot();
+        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+        let size = config.initial_size(dpi as u32, None);
+        let term_config = Arc::new(config::TermConfig::with_config(config));
+
+        let spawn_cmd = SpawnCommand {
+            domain: SpawnTabDomain::DomainName("local".to_string()),
+            args: Some(vec![shell, "-l".to_string(), "-c".to_string(), command_str]),
+            ..Default::default()
+        };
+
+        crate::spawn::spawn_command_impl(
+            &spawn_cmd,
+            SpawnWhere::NewWindow,
+            size,
+            None,
+            term_config,
+        );
+    })
+    .detach();
+}
+
+pub fn set_default_terminal_with_feedback() {
+    fn show_window_toast(message: &str) -> bool {
+        let windows = front_end().gui_windows();
+        if windows.is_empty() {
+            return false;
+        }
+
+        for gui in windows {
+            let text = message.to_string();
+            gui.window
+                .notify(TermWindowNotif::Apply(Box::new(move |tw| {
+                    tw.show_toast(text);
+                })));
+        }
+
+        true
+    }
+
+    match Connection::get() {
+        Some(conn) => match conn.set_default_terminal() {
+            Ok(()) => {
+                let message = "Kaku is now the default terminal";
+                if !show_window_toast(message) {
+                    conn.alert("Default Terminal", message);
                 }
             }
-            Err(e) => {
-                log::error!("Failed to check for updates: {}", e);
-                let msg = format!("Failed to check for updates: {}", e);
-                promise::spawn::spawn_into_main_thread(async move {
-                    if let Some(conn) = Connection::get() {
-                        conn.alert("Check for Updates", &msg);
-                    }
-                })
-                .detach();
+            Err(err) => {
+                let message = format!("Failed to set Kaku as default terminal: {err:#}");
+                log::error!("{message}");
+                if !show_window_toast("Failed to set default terminal") {
+                    conn.alert("Default Terminal", &message);
+                }
             }
+        },
+        None => {
+            log::error!("Cannot set default terminal because no GUI connection is available");
         }
-    });
+    }
 }
 
 impl GuiFrontEnd {
     pub fn try_new() -> anyhow::Result<Rc<GuiFrontEnd>> {
         let connection = Connection::init()?;
         connection.set_event_handler(Self::app_event_handler);
+        connection.flush_pending_service_events();
+        ::window::connection::mark_app_event_handler_ready();
+        connection.flush_pending_service_events();
 
         let mux = Mux::get();
         let client_id = mux.active_identity().expect("to have set my own id");
@@ -120,6 +269,7 @@ impl GuiFrontEnd {
             known_windows: RefCell::new(BTreeMap::new()),
             client_id: client_id.clone(),
             config_subscription: RefCell::new(None),
+            unread_bell_count: RefCell::new(0),
         });
 
         mux.subscribe(move |n| {
@@ -223,14 +373,28 @@ impl GuiFrontEnd {
                         | Alert::SetUserVar { .. },
                 } => {}
                 MuxNotification::Empty => {
-                    if config::configuration().quit_when_all_windows_are_closed {
-                        promise::spawn::spawn_into_main_thread(async move {
-                            if mux::activity::Activity::count() == 0 {
-                                log::trace!("Mux is now empty, terminate gui");
-                                Connection::get().unwrap().terminate_message_loop();
-                            }
-                        })
-                        .detach();
+                    #[cfg(target_os = "macos")]
+                    {
+                        // Keep the app process alive on macOS when the last
+                        // window closes, so Dock reopen is instant and consistent.
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        if config::configuration().quit_when_all_windows_are_closed {
+                            promise::spawn::spawn_into_main_thread(async move {
+                                if mux::activity::Activity::count() == 0 {
+                                    log::trace!("Mux is now empty, terminate gui");
+                                    if let Some(conn) = Connection::get() {
+                                        conn.terminate_message_loop();
+                                    } else {
+                                        log::warn!(
+                                            "Cannot terminate message loop: GUI connection is not initialized"
+                                        );
+                                    }
+                                }
+                            })
+                            .detach();
+                        }
                     }
                 }
                 MuxNotification::SaveToDownloads { name, data } => {
@@ -265,7 +429,7 @@ impl GuiFrontEnd {
                                         Clipboard::PrimarySelection
                                     }
                                 },
-                                clipboard.unwrap_or_else(String::new),
+                                clipboard.map(|s| s.to_string()).unwrap_or_default(),
                             );
                         } else {
                             log::error!("Cannot assign clipboard as there are no windows");
@@ -276,73 +440,168 @@ impl GuiFrontEnd {
             }
             true
         });
-        // Re-evaluate the config so that folks that are using
-        // `wezterm.gui.get_appearance()` can have that take effect
-        // before any windows are created
-        config::reload();
+        // Re-evaluate config only if it queried `wezterm.gui.get_appearance()`
+        // before the GUI connection was ready during initial config load.
+        if window_funcs::take_appearance_queried_before_gui_ready() {
+            config::reload();
+        }
+        refresh_fast_config_snapshot();
 
-        // And build the initial menu bar.
-        // TODO: arrange for this to happen on config reload.
+        // Build the initial menubar synchronously so AppKit has selectors
+        // registered before users hit menu actions or key equivalents.
         crate::commands::CommandDef::recreate_menubar(&config::configuration());
+        front_end.connection.sync_global_hotkey();
 
         Ok(front_end)
     }
 
+    fn spawn_open_command_script(file_name: String, prefer_existing_window: bool) {
+        let is_directory = Path::new(&file_name).is_dir();
+        let quoted_file_name = if is_directory {
+            None
+        } else {
+            match shlex::try_quote(&file_name) {
+                Ok(name) => Some(name.into_owned()),
+                Err(_) => {
+                    log::error!(
+                        "OpenCommandScript: {file_name} has embedded NUL bytes and
+                         cannot be launched via the shell"
+                    );
+                    return;
+                }
+            }
+        };
+
+        promise::spawn::spawn(async move {
+            use config::keyassignment::SpawnTabDomain;
+            use wezterm_term::TerminalSize;
+
+            // We send the script to execute to the shell on stdin, rather than ask the
+            // shell to execute it directly, so that we start the shell and read in the
+            // user's rc files before running the script.  Without this, wezterm on macOS
+            // is launched with a default and very anemic path, and that is frustrating for
+            // users.
+
+            let mux = Mux::get();
+            let workspace = mux.active_workspace();
+            let window_id = if prefer_existing_window {
+                let mut windows = mux.iter_windows_in_workspace(&workspace);
+                windows.pop()
+            } else {
+                None
+            };
+            let pane_id = None;
+            let cmd = None;
+            let cwd = if is_directory {
+                Some(file_name.clone())
+            } else {
+                None
+            };
+
+            match mux
+                .spawn_tab_or_window(
+                    window_id,
+                    SpawnTabDomain::DomainName("local".to_string()),
+                    cmd,
+                    cwd,
+                    None,
+                    TerminalSize::default(),
+                    pane_id,
+                    workspace,
+                    None, // optional position
+                )
+                .await
+            {
+                Ok((_tab, pane, _window_id)) => {
+                    if let Some(quoted_file_name) = quoted_file_name {
+                        log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
+                        let mut writer = pane.writer();
+                        if let Err(err) = write!(writer, "{quoted_file_name} ; exit\n") {
+                            log::warn!("failed to send spawned command to pane: {err:#}");
+                        }
+                    } else {
+                        log::trace!("Spawned pane_id {} with cwd={file_name}", pane.pane_id());
+                    }
+                }
+                Err(err) => {
+                    log::error!("Failed to spawn {file_name}: {err:#?}");
+                }
+            };
+        })
+        .detach();
+    }
+    fn activate_tab_for_tty(tty_name: String) {
+        let tty_name = tty_name.trim().to_string();
+        if tty_name.is_empty() {
+            log::warn!("ActivatePaneForTty called with empty tty");
+            return;
+        }
+
+        let mut tty_candidates = vec![tty_name.clone()];
+        if let Some(stripped) = tty_name.strip_prefix("/dev/") {
+            tty_candidates.push(stripped.to_string());
+        } else {
+            tty_candidates.push(format!("/dev/{tty_name}"));
+        }
+        tty_candidates.sort();
+        tty_candidates.dedup();
+
+        let target_basename = Path::new(&tty_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string());
+
+        let mux = Mux::get();
+        let pane_id = mux.iter_panes().into_iter().find_map(|pane| {
+            let pane_tty = pane.tty_name()?;
+            if tty_candidates
+                .iter()
+                .any(|candidate| candidate == &pane_tty)
+            {
+                return Some(pane.pane_id());
+            }
+
+            if let Some(target_basename) = target_basename.as_deref() {
+                let pane_basename = Path::new(&pane_tty)
+                    .file_name()
+                    .and_then(|name| name.to_str());
+                if pane_basename == Some(target_basename) {
+                    return Some(pane.pane_id());
+                }
+            }
+
+            None
+        });
+
+        let Some(pane_id) = pane_id else {
+            log::warn!("No pane found for tty={tty_name}");
+            return;
+        };
+
+        if let Err(err) = mux.focus_pane_and_containing_tab(pane_id) {
+            log::error!("Failed to focus pane {pane_id} for tty={tty_name}: {err:#}");
+            return;
+        }
+
+        if let Some((_domain, window_id, _tab_id)) = mux.resolve_pane_id(pane_id) {
+            if let Some(fe) = try_front_end() {
+                if let Some(gui_window) = fe.gui_window_for_mux_window(window_id) {
+                    gui_window.window.focus();
+                }
+            }
+        }
+    }
+
     fn app_event_handler(event: ApplicationEvent) {
-        log::trace!("Got app event {event:?}");
         match event {
             ApplicationEvent::OpenCommandScript(file_name) => {
-                let quoted_file_name = match shlex::try_quote(&file_name) {
-                    Ok(name) => name.to_owned().to_string(),
-                    Err(_) => {
-                        log::error!(
-                            "OpenCommandScript: {file_name} has embedded NUL bytes and
-                             cannot be launched via the shell"
-                        );
-                        return;
-                    }
-                };
-                promise::spawn::spawn(async move {
-                    use config::keyassignment::SpawnTabDomain;
-                    use wezterm_term::TerminalSize;
-
-                    // We send the script to execute to the shell on stdin, rather than ask the
-                    // shell to execute it directly, so that we start the shell and read in the
-                    // user's rc files before running the script.  Without this, wezterm on macOS
-                    // is launched with a default and very anemic path, and that is frustrating for
-                    // users.
-
-                    let mux = Mux::get();
-                    let window_id = None;
-                    let pane_id = None;
-                    let cmd = None;
-                    let cwd = None;
-                    let workspace = mux.active_workspace();
-
-                    match mux
-                        .spawn_tab_or_window(
-                            window_id,
-                            SpawnTabDomain::DomainName("local".to_string()),
-                            cmd,
-                            cwd,
-                            TerminalSize::default(),
-                            pane_id,
-                            workspace,
-                            None, // optional position
-                        )
-                        .await
-                    {
-                        Ok((_tab, pane, _window_id)) => {
-                            log::trace!("Spawned {file_name} as pane_id {}", pane.pane_id());
-                            let mut writer = pane.writer();
-                            write!(writer, "{quoted_file_name} ; exit\n").ok();
-                        }
-                        Err(err) => {
-                            log::error!("Failed to spawn {file_name}: {err:#?}");
-                        }
-                    };
-                })
-                .detach();
+                Self::spawn_open_command_script(file_name, false);
+            }
+            ApplicationEvent::OpenCommandScriptInTab(file_name) => {
+                Self::spawn_open_command_script(file_name, true);
+            }
+            ApplicationEvent::ActivatePaneForTty(tty_name) => {
+                Self::activate_tab_for_tty(tty_name);
             }
             ApplicationEvent::PerformKeyAssignment(action) => {
                 // We should only get here when there are no windows open
@@ -351,24 +610,53 @@ impl GuiFrontEnd {
                 // future.
 
                 fn spawn_command(spawn: &SpawnCommand, spawn_where: SpawnWhere) {
-                    let config = config::configuration();
+                    let config = fast_config_snapshot();
                     let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
-                    let size =
-                        config.initial_size(dpi as u32, crate::cell_pixel_dims(&config, dpi).ok());
+                    // Keep this path cheap when no GUI window exists yet:
+                    // avoid font metric resolution here and let the window layer
+                    // apply final geometry/pixel sizing.
+                    let size = config.initial_size(dpi as u32, None);
                     let term_config = Arc::new(config::TermConfig::with_config(config));
 
-                    crate::spawn::spawn_command_impl(spawn, spawn_where, size, None, term_config)
+                    crate::spawn::spawn_command_impl(spawn, spawn_where, size, None, term_config);
                 }
 
                 match action {
-                    KeyAssignment::EmitEvent(event) if event == "check-for-update" => {
-                        check_for_updates();
+                    KeyAssignment::EmitEvent(event)
+                        if event == "update-kaku" || event == "run-kaku-update" =>
+                    {
+                        run_kaku_update_from_menu();
+                    }
+                    KeyAssignment::EmitEvent(event) if event == "run-kaku-cli" => {
+                        let kaku_cli = kaku_cli_program_for_spawn();
+                        spawn_command(
+                            &SpawnCommand {
+                                args: Some(vec![kaku_cli]),
+                                ..Default::default()
+                            },
+                            SpawnWhere::NewWindow,
+                        );
+                    }
+                    KeyAssignment::EmitEvent(event) if event == "open-kaku-config" => {
+                        open_kaku_config();
+                    }
+                    KeyAssignment::EmitEvent(event) if event == SET_DEFAULT_TERMINAL_EVENT => {
+                        set_default_terminal_with_feedback();
+                    }
+                    KeyAssignment::ReloadConfiguration => {
+                        // Manual reload is intentionally disabled.
                     }
                     KeyAssignment::QuitApplication => {
                         // If we get here, there are no windows that could have received
                         // the QuitApplication command, therefore it must be ok to quit
                         // immediately
-                        Connection::get().unwrap().terminate_message_loop();
+                        if let Some(conn) = Connection::get() {
+                            conn.terminate_message_loop();
+                        } else {
+                            log::warn!(
+                                "Cannot terminate message loop for QuitApplication: GUI connection is not initialized"
+                            );
+                        }
                     }
                     KeyAssignment::SpawnWindow => {
                         spawn_command(&SpawnCommand::default(), SpawnWhere::NewWindow);
@@ -496,7 +784,13 @@ impl GuiFrontEnd {
                     .insert(mux_window_id);
                 log::trace!("Creating TermWindow for mux_window_id={}", mux_window_id);
                 if let Err(err) = TermWindow::new_window(mux_window_id).await {
+                    let err_text = format!("{:#}", err);
                     log::error!("Failed to create window: {:#}", err);
+                    if err_text.contains("failed to create NSOpenGLPixelFormat") {
+                        log::error!(
+                            "OpenGL initialization failed. This often means no compatible GPU renderer is available (for example in some VMs). Try setting `front_end = 'WebGpu'` in kaku.lua or enabling VM GPU acceleration."
+                        );
+                    }
                     let mux = Mux::get();
                     mux.kill_window(mux_window_id);
                     front_end()
@@ -542,6 +836,36 @@ impl GuiFrontEnd {
         if !self.is_switching_workspace() {
             self.reconcile_workspace();
         }
+    }
+
+    fn update_unread_bell_badge(&self, current: usize) {
+        // Always update badge: show count if enabled, clear otherwise
+        if config::configuration().bell_dock_badge && current > 0 {
+            self.connection.set_dock_badge(Some(&current.to_string()));
+        } else {
+            self.connection.set_dock_badge(None);
+        }
+    }
+
+    /// Adjust the global unread bell count and update Dock badge.
+    /// Pass positive value to increment, negative to decrement.
+    pub fn adjust_unread_bell_count(&self, delta: isize) {
+        let mut count = self.unread_bell_count.borrow_mut();
+        if delta > 0 {
+            *count = count.saturating_add(delta as usize);
+        } else {
+            *count = count.saturating_sub((-delta) as usize);
+        }
+        let current = *count;
+        drop(count);
+
+        self.update_unread_bell_badge(current);
+    }
+
+    /// Re-evaluate Dock badge visibility using the current unread count.
+    pub fn sync_unread_bell_badge(&self) {
+        let current = *self.unread_bell_count.borrow();
+        self.update_unread_bell_badge(current);
     }
 
     pub fn is_switching_workspace(&self) -> bool {
@@ -609,10 +933,26 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
 
     let config_subscription = config::subscribe_to_config_reload({
         move || {
+            // This callback may run while the config mutex is held;
+            // refresh asynchronously to avoid re-locking config here.
             promise::spawn::spawn_into_main_thread(async {
-                crate::commands::CommandDef::recreate_menubar(&config::configuration());
+                refresh_fast_config_snapshot();
+                if let Some(conn) = Connection::get() {
+                    conn.sync_global_hotkey();
+                }
             })
             .detach();
+            // TODO(macos): AppKit does not allow safe async menubar reconstruction
+            // from a config-reload callback; the initial menubar is built synchronously
+            // in try_new(). Re-enable on macOS once a safe main-thread dispatch path
+            // is available.
+            #[cfg(not(target_os = "macos"))]
+            {
+                promise::spawn::spawn_into_main_thread(async {
+                    crate::commands::CommandDef::recreate_menubar(&config::configuration());
+                })
+                .detach();
+            }
             true
         }
     });

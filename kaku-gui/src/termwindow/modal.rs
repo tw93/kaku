@@ -20,6 +20,7 @@ pub trait Modal: Downcast {
         mods: KeyModifiers,
         term_window: &mut TermWindow,
     ) -> anyhow::Result<bool>;
+    fn focus_changed(&self, _focused: bool, _term_window: &mut TermWindow) {}
     fn computed_element(
         &self,
         term_window: &mut TermWindow,

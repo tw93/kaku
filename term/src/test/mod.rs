@@ -1373,3 +1373,158 @@ fn test_hyperlinks() {
         Compare::TEXT | Compare::ATTRS,
     );
 }
+
+// ========== Primary Screen Peek Tests ==========
+
+#[test]
+fn test_primary_peek_basic() {
+    // Basic: set peek in alt screen, peek should be invalid after exiting alt screen
+    let mut term = TestTerm::new(5, 10, 100);
+    term.print("line1\nline2\nline3\nline4\nline5");
+
+    // Enter alt screen
+    term.set_mode("?1049", true);
+    assert!(term.is_alt_screen_active());
+    assert!(!term.is_primary_peek());
+
+    // Set peek
+    term.set_primary_peek(true);
+    assert!(term.is_primary_peek());
+
+    // Exit alt screen → peek should automatically become invalid (is_primary_peek checks alt screen state)
+    term.set_mode("?1049", false);
+    assert!(!term.is_alt_screen_active());
+    assert!(!term.is_primary_peek());
+}
+
+#[test]
+fn test_primary_peek_cleared_on_decset_exit() {
+    // Clear primary_peek flag when DECSET 1049 exits alt screen
+    let mut term = TestTerm::new(5, 10, 100);
+    term.print("hello");
+    term.set_mode("?1049", true);
+    term.set_primary_peek(true);
+    assert!(term.is_primary_peek());
+
+    // DECSET 1049 reset
+    term.set_mode("?1049", false);
+    // The flag itself should be cleared, not just is_primary_peek() returning false
+    // Re-entering alt screen should not have residual peek
+    term.set_mode("?1049", true);
+    assert!(
+        !term.is_primary_peek(),
+        "peek flag should not leak to new alt screen session"
+    );
+}
+
+#[test]
+fn test_primary_peek_cleared_on_soft_reset() {
+    // Soft Reset (DECSTR) should clear primary_peek flag
+    let mut term = TestTerm::new(5, 10, 100);
+    term.print("hello");
+    term.set_mode("?1049", true);
+    term.set_primary_peek(true);
+    assert!(term.is_primary_peek());
+
+    // Soft Reset
+    term.soft_reset();
+    // Soft Reset exits alt screen, peek flag should be cleared
+    assert!(
+        !term.is_primary_peek(),
+        "peek should not remain after soft reset"
+    );
+
+    // Re-entering alt screen should not have residual peek
+    term.set_mode("?1049", true);
+    assert!(
+        !term.is_primary_peek(),
+        "re-entering alt screen after soft reset should not trigger peek"
+    );
+}
+
+#[test]
+fn test_primary_peek_not_active_outside_alt_screen() {
+    // is_primary_peek should always return false outside alt screen
+    let mut term = TestTerm::new(5, 10, 100);
+    term.print("hello");
+    assert!(!term.is_alt_screen_active());
+
+    // Even if manually setting flag, is_primary_peek returns false
+    term.set_primary_peek(true);
+    assert!(
+        !term.is_primary_peek(),
+        "peek should not activate outside alt screen"
+    );
+}
+
+#[test]
+fn test_primary_peek_renders_primary_screen() {
+    // Peek mode should display primary screen content
+    // Note: \n is pure LF, no CR, need to use \r\n to return cursor to line start
+    let mut term = TestTerm::new(3, 10, 100);
+    term.print("primary1\r\nprimary2\r\nprimary3");
+
+    // Enter alt screen, content becomes empty
+    term.set_mode("?1049", true);
+    term.print("alt1\r\nalt2\r\nalt3");
+
+    // Enable peek → should see primary screen
+    term.set_primary_peek(true);
+    assert!(term.is_primary_peek());
+
+    // Verify primary_screen() still has original content
+    let primary_lines = term.primary_screen().visible_lines();
+    let first_line = primary_lines[0].as_str();
+    assert!(
+        first_line.contains("primary1"),
+        "peek should be able to access primary screen content"
+    );
+}
+
+#[test]
+fn test_primary_peek_no_leak_across_sessions() {
+    // Multiple in/out of alt screen, peek should not leak
+    let mut term = TestTerm::new(5, 10, 100);
+    term.print("data");
+
+    for _ in 0..3 {
+        term.set_mode("?1049", true);
+        assert!(
+            !term.is_primary_peek(),
+            "peek should be false when entering alt screen"
+        );
+        term.set_primary_peek(true);
+        assert!(term.is_primary_peek());
+        term.set_mode("?1049", false);
+        assert!(!term.is_primary_peek());
+    }
+
+    // Finally confirm no residual
+    term.set_mode("?1049", true);
+    assert!(
+        !term.is_primary_peek(),
+        "peek should not remain after multiple rounds"
+    );
+}
+
+#[test]
+fn test_alternate_scroll_mode_marks_mouse_grabbed() {
+    let mut term = TestTerm::new(5, 10, 100);
+    assert!(!term.is_mouse_grabbed());
+
+    term.set_mode("?1007", true);
+    assert!(term.is_mouse_grabbed());
+
+    term.set_mode("?1007", false);
+    assert!(!term.is_mouse_grabbed());
+}
+
+#[test]
+fn test_alternate_scroll_mode_cleared_on_soft_reset() {
+    let mut term = TestTerm::new(5, 10, 100);
+    term.set_mode("?1007", true);
+    assert!(term.is_mouse_grabbed());
+
+    term.soft_reset();
+    assert!(!term.is_mouse_grabbed());
+}

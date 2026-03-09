@@ -61,6 +61,7 @@ dhat-heap.json
 /wezterm.rb
 /perf.data*
 .idea/
+/.claude/
 /winget-pkgs
 /assets/flatpak/generated-sources.json
 /__pycache__/
@@ -75,3 +76,15 @@ CLAUDE.md
 /assets/vendor/*
 !/assets/vendor/starship.toml
 .ace-tool/
+/.sisyphus/
+/log/
+
+# Changelog is managed in GitHub Releases only
+CHANGELOG.md
+
+# Sync generated files
+.claude/
+AGENT.md
+AGENTS.md
+CLAUDE.md
+.agents/

@@ -5,6 +5,7 @@ use config::keyassignment::KeyAssignment;
 use config::DimensionContext;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 thread_local! {
@@ -14,8 +15,24 @@ thread_local! {
 fn nop_event_handler(_event: ApplicationEvent) {}
 
 static EVENT_HANDLER: Mutex<fn(ApplicationEvent)> = Mutex::new(nop_event_handler);
+static APP_EVENT_HANDLER_READY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn app_event_handler_ready() -> bool {
+    APP_EVENT_HANDLER_READY.load(Ordering::Acquire)
+}
+
+pub fn mark_app_event_handler_ready() {
+    APP_EVENT_HANDLER_READY.store(true, Ordering::Release);
+}
 
 pub fn shutdown() {
+    {
+        let mut handler = EVENT_HANDLER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *handler = nop_event_handler;
+    }
+    APP_EVENT_HANDLER_READY.store(false, Ordering::Release);
     CONN.with(|m| drop(m.borrow_mut().take()));
 }
 
@@ -23,6 +40,10 @@ pub fn shutdown() {
 pub enum ApplicationEvent {
     /// The system wants to open a command in the terminal
     OpenCommandScript(String),
+    /// The system wants to open a command in a new tab when possible
+    OpenCommandScriptInTab(String),
+    /// The system requests focusing the tab/pane that owns this tty.
+    ActivatePaneForTty(String),
     PerformKeyAssignment(KeyAssignment),
 }
 
@@ -40,12 +61,18 @@ pub trait ConnectionOps {
     fn name(&self) -> String;
 
     fn set_event_handler(&self, func: fn(ApplicationEvent)) {
-        let mut handler = EVENT_HANDLER.lock().unwrap();
+        let mut handler = EVENT_HANDLER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         *handler = func;
     }
 
     fn dispatch_app_event(&self, event: ApplicationEvent) {
-        let func = EVENT_HANDLER.lock().unwrap();
+        // Copy the function pointer while holding the lock, then invoke it
+        // after unlocking to avoid lock reentry from callback code.
+        let func = *EVENT_HANDLER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         func(event);
     }
 
@@ -82,8 +109,30 @@ pub trait ConnectionOps {
         false
     }
 
+    /// Set this app as the system default terminal handler.
+    fn set_default_terminal(&self) -> Fallible<()> {
+        Err(anyhow::anyhow!(
+            "setting default terminal is not supported on this platform"
+        ))
+    }
+
+    /// Returns true if this app is already the system default terminal handler.
+    fn is_default_terminal(&self) -> bool {
+        false
+    }
+
+    /// Replay any queued platform service events once app event handlers are ready.
+    fn flush_pending_service_events(&self) {}
+
+    /// Synchronize platform global hotkey registration from current config.
+    fn sync_global_hotkey(&self) {}
+
     /// Perform the system beep/notification sound
     fn beep(&self) {}
+
+    /// Set the Dock badge label (macOS only).
+    /// Pass None to clear the badge.
+    fn set_dock_badge(&self, _label: Option<&str>) {}
 
     /// Returns information about the screens
     fn screens(&self) -> anyhow::Result<Screens> {

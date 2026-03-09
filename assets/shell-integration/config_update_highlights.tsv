@@ -1,0 +1,14 @@
+11	Shell text editing: Cmd+A select all, Shift+Arrow selection, ESC to cancel
+11	AI error fixer: auto-suggests fixes on failure, Cmd+Shift+E to apply
+11	Type y to launch Yazi, cd+Tab falls back to zsh-z history
+11	Plugins already loaded by your config are no longer duplicated
+11	Fixed: delete key after Chinese IME, terminal type for sudo+nano
+11	Improved shell integration defaults for daily terminal editing
+12	Shell text editing now supports Cmd+A, Shift+Arrow selection, and ESC cancel
+12	AI error fixer can suggest and apply fixes directly in the terminal
+12	Yazi launcher and cd+Tab fallback are now built into the default shell workflow
+12	Shell integration compatibility is improved for SSH, Delete key behavior, and existing plugins
+13	Starship prompt and AI shell hooks are more reliable in zsh and xterm-256color environments
+13	First-run setup and managed shell integration refresh are more stable across environments
+14	Fixed an early 0.6.0 zsh prompt helper issue and now regenerate the managed script correctly
+15	Yazi now follows Kaku dark and light themes automatically, with corrected folder and file colors in both modes

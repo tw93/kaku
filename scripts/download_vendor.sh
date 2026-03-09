@@ -1,65 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script downloads external dependencies for bundling into the Kaku App.
-# It should be run before packaging.
+# This script downloads plugin dependencies bundled into the Kaku App.
+# CLI tools (starship/git-delta/lazygit) are installed via Homebrew at init time.
 
 VENDOR_DIR="$(cd "$(dirname "$0")/../assets/vendor" && pwd)"
 mkdir -p "$VENDOR_DIR"
 
-echo "[1/3] Downloading Starship (Universal Binary)..."
-STARSHIP_BIN="$VENDOR_DIR/starship"
+download_pinned_repo() {
+	local step="$1"
+	local name="$2"
+	local repo="$3"
+	local ref="$4"
+	local dest="$VENDOR_DIR/$name"
+	local marker_file="$dest/.kaku-vendor-ref"
+	local archive_url="https://codeload.github.com/$repo/tar.gz/$ref"
+	local temp_dir
+	local extract_dir
+	local archive_path
+	local source_dir
 
-# Download both architectures
-URL_ARM64="https://github.com/starship/starship/releases/latest/download/starship-aarch64-apple-darwin.tar.gz"
-URL_X86_64="https://github.com/starship/starship/releases/latest/download/starship-x86_64-apple-darwin.tar.gz"
+	echo "[$step/4] Syncing $name @ $ref..."
+	if [[ -f "$marker_file" ]] && [[ "$(cat "$marker_file")" == "$ref" ]]; then
+		echo "$name already pinned to $ref, skipping."
+		return
+	fi
 
-if [[ ! -f "$STARSHIP_BIN" ]]; then
-	echo "Creating Universal Binary for Starship..."
-	mkdir -p "$VENDOR_DIR/tmp_starship"
+	temp_dir="$(mktemp -d)"
+	trap 'rm -rf "$temp_dir"' RETURN
+	extract_dir="$temp_dir/extract"
+	archive_path="$temp_dir/$name.tar.gz"
+	mkdir -p "$extract_dir"
 
-	curl -L "$URL_ARM64" | tar -xz -C "$VENDOR_DIR/tmp_starship"
-	mv "$VENDOR_DIR/tmp_starship/starship" "$VENDOR_DIR/tmp_starship/starship_arm64"
+	curl --fail --location --silent --show-error --retry 3 --retry-delay 2 "$archive_url" --output "$archive_path"
+	tar -xzf "$archive_path" -C "$extract_dir"
+	source_dir="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+	if [[ -z "$source_dir" ]]; then
+		echo "Failed to unpack $name from $archive_url" >&2
+		exit 1
+	fi
 
-	curl -L "$URL_X86_64" | tar -xz -C "$VENDOR_DIR/tmp_starship"
-	mv "$VENDOR_DIR/tmp_starship/starship" "$VENDOR_DIR/tmp_starship/starship_x86_64"
+	rm -rf "$dest"
+	mv "$source_dir" "$dest"
+	printf '%s\n' "$ref" > "$marker_file"
+	trap - RETURN
+	rm -rf "$temp_dir"
+}
 
-	# Create Universal Binary using lipo
-	lipo -create -output "$STARSHIP_BIN" \
-		"$VENDOR_DIR/tmp_starship/starship_arm64" \
-		"$VENDOR_DIR/tmp_starship/starship_x86_64"
+echo "[0/4] Cleaning legacy vendor binaries..."
+rm -f "$VENDOR_DIR/starship" "$VENDOR_DIR/delta" "$VENDOR_DIR/zoxide"
+rm -rf "$VENDOR_DIR/completions" "$VENDOR_DIR/man"
+rm -f "$VENDOR_DIR/README.md" "$VENDOR_DIR/CHANGELOG.md" "$VENDOR_DIR/LICENSE"
 
-	chmod +x "$STARSHIP_BIN"
-	rm -rf "$VENDOR_DIR/tmp_starship"
-else
-	echo "Starship already exists, skipping."
-fi
-
-echo "[2/3] Cloning zsh-autosuggestions..."
-AUTOSUGGEST_DIR="$VENDOR_DIR/zsh-autosuggestions"
-if [[ ! -d "$AUTOSUGGEST_DIR" ]]; then
-	git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions "$AUTOSUGGEST_DIR"
-	rm -rf "$AUTOSUGGEST_DIR/.git"
-else
-	echo "zsh-autosuggestions already exists, skipping."
-fi
-
-echo "[3/3] Cloning zsh-syntax-highlighting..."
-SYNTAX_DIR="$VENDOR_DIR/zsh-syntax-highlighting"
-if [[ ! -d "$SYNTAX_DIR" ]]; then
-	git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$SYNTAX_DIR"
-	rm -rf "$SYNTAX_DIR/.git"
-else
-	echo "zsh-syntax-highlighting already exists, skipping."
-fi
-
-echo "[Extra] Cloning zsh-z..."
-ZSH_Z_DIR="$VENDOR_DIR/zsh-z"
-if [[ ! -d "$ZSH_Z_DIR" ]]; then
-	git clone --depth 1 https://github.com/agkozak/zsh-z "$ZSH_Z_DIR"
-	rm -rf "$ZSH_Z_DIR/.git"
-else
-	echo "zsh-z already exists, skipping."
-fi
+# Pin external shell integrations to exact commits so app/release artifacts stay reproducible.
+download_pinned_repo "1" "zsh-autosuggestions" "zsh-users/zsh-autosuggestions" "85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5"
+download_pinned_repo "2" "zsh-syntax-highlighting" "zsh-users/zsh-syntax-highlighting" "1d85c692615a25fe2293bdd44b34c217d5d2bf04"
+download_pinned_repo "3" "zsh-completions" "zsh-users/zsh-completions" "84615f3d0b0e943d5b1de862c9552e572c8e70bb"
+download_pinned_repo "4" "zsh-z" "agkozak/zsh-z" "cf9225feebfae55e557e103e95ce20eca5eff270"
 
 echo "Vendor dependencies downloaded to $VENDOR_DIR"

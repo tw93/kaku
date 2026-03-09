@@ -929,6 +929,8 @@ pub enum DecPrivateModeCode {
     /// enable mouse reporting itself, it just controls how reports
     /// will be encoded.
     SGRMouse = 1006,
+    /// xterm alternate scroll mode
+    AlternateScroll = 1007,
     /// Use pixels rather than text cells in mouse reporting.  Does
     /// not enable mouse reporting itself, it just controls how
     /// reports will be encoded.

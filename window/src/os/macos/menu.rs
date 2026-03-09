@@ -306,6 +306,14 @@ impl MenuItem {
         }
     }
 
+    pub fn set_state(&self, on: bool) {
+        // NSControlStateValueOn = 1, NSControlStateValueOff = 0
+        let state: NSInteger = if on { 1 } else { 0 };
+        unsafe {
+            let () = msg_send![*self.item, setState: state];
+        }
+    }
+
     pub fn get_title(&self) -> String {
         unsafe {
             let title: id = msg_send![*self.item, title];

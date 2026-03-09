@@ -8,6 +8,7 @@ use crate::tmux_commands::{
 use crate::window::WindowId;
 use crate::{Mux, MuxWindowBuilder};
 use async_trait::async_trait;
+use config::keyassignment::PaneEncoding;
 use filedescriptor::FileDescriptor;
 use parking_lot::{Condvar, Mutex};
 use portable_pty::CommandBuilder;
@@ -259,7 +260,7 @@ impl TmuxDomainState {
     }
 
     /// schedule a `send_next_command` into main thread
-    pub fn schedule_send_next_command(domain_id: usize) {
+    pub fn schedule_send_next_command(domain_id: DomainId) {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
             if let Some(domain) = mux.get_domain(domain_id) {
@@ -364,9 +365,11 @@ impl TmuxDomain {
 impl Domain for TmuxDomain {
     async fn spawn(
         &self,
+        _mux: &Mux,
         _size: TerminalSize,
         _command: Option<CommandBuilder>,
         _command_dir: Option<String>,
+        _encoding: PaneEncoding,
         _window: WindowId,
     ) -> anyhow::Result<Arc<Tab>> {
         self.inner.create_tmux_window();
@@ -378,6 +381,7 @@ impl Domain for TmuxDomain {
 
     async fn split_pane(
         &self,
+        _mux: &Mux,
         _source: SplitSource,
         tab: TabId,
         pane_id: PaneId,
@@ -402,9 +406,11 @@ impl Domain for TmuxDomain {
 
     async fn spawn_pane(
         &self,
+        _mux: &Mux,
         _size: TerminalSize,
         _command: Option<CommandBuilder>,
         _command_dir: Option<String>,
+        _encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         anyhow::bail!("Spawn_pane not yet implemented for TmuxDomain");
     }

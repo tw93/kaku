@@ -46,10 +46,15 @@ impl SetTabTitle {
         } else {
             // Find the current tab from the pane id
             let pane_id = client.resolve_pane_id(self.pane_id).await?;
-            pane_id_to_tab_id
-                .get(&pane_id)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("unable to resolve current tab"))?
+            match pane_id_to_tab_id.get(&pane_id).copied() {
+                Some(id) => id,
+                None => {
+                    anyhow::bail!(
+                        "pane {} not found; use --tab-id to specify the target tab explicitly",
+                        pane_id
+                    );
+                }
+            }
         };
 
         client

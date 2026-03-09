@@ -30,6 +30,10 @@ pub fn default_dpi() -> f64 {
     }
 }
 
+pub fn drain_spawn_queue_burst(max_funcs: usize) -> bool {
+    spawn::run_spawn_queue_burst(max_funcs)
+}
+
 mod egl;
 
 pub use bitmaps::{BitmapImage, Image};
@@ -42,6 +46,12 @@ pub use wezterm_input_types::*;
 pub enum Clipboard {
     Clipboard,
     PrimarySelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardData {
+    Text(String),
+    Files(Vec<PathBuf>),
 }
 
 impl Default for Clipboard {
@@ -264,8 +274,15 @@ pub trait WindowOps {
         Ok(())
     }
 
-    /// Hide a visible window
+    /// Hide a visible window (minimize to Dock)
     fn hide(&self);
+
+    /// Remove the window from screen without minimize animation.
+    /// Used by macOS close button to hide window while preserving running commands.
+    fn order_out(&self) {
+        // Default implementation falls back to hide for non-macOS platforms
+        self.hide();
+    }
 
     /// Schedule the window to be closed
     fn close(&self);
@@ -316,6 +333,8 @@ pub trait WindowOps {
     /// Initiate textual transfer from the clipboard
     fn get_clipboard(&self, clipboard: Clipboard) -> Future<String>;
 
+    fn get_clipboard_data(&self, clipboard: Clipboard) -> Future<ClipboardData>;
+
     /// Set some text in the clipboard
     fn set_clipboard(&self, clipboard: Clipboard, text: String);
 
@@ -334,6 +353,13 @@ pub trait WindowOps {
     fn toggle_fullscreen(&self) {}
 
     fn config_did_change(&self, _config: &config::ConfigHandle) {}
+
+    /// Check if the window is in a zoom (maximize/restore) animation.
+    /// Returns true if within the animation period to allow hiding content
+    /// during the transition to avoid visual flickering.
+    fn is_zoom_animation_active(&self) -> bool {
+        false
+    }
 
     /// Configure the Window so that the desktop environment
     /// will constrain resizes so that they are multiples of

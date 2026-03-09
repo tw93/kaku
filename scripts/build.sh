@@ -6,6 +6,10 @@ if [[ "${OSTYPE:-}" != darwin* ]]; then
 	exit 1
 fi
 
+# Keep vendored native deps on the same minimum macOS target as Rust.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+export CMAKE_OSX_DEPLOYMENT_TARGET="${CMAKE_OSX_DEPLOYMENT_TARGET:-11.0}"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -14,27 +18,143 @@ TARGET_DIR="${TARGET_DIR:-target}"
 PROFILE="${PROFILE:-release}"
 OUT_DIR="${OUT_DIR:-dist}"
 OPEN_APP="${OPEN_APP:-0}"
+APP_ONLY="${APP_ONLY:-0}"
+BUILD_ARCH="${BUILD_ARCH:-}"
+KAKU_REQUIRE_SIGNED_RELEASE="${KAKU_REQUIRE_SIGNED_RELEASE:-0}"
 
-if [[ "${1:-}" == "--open" ]]; then
-	OPEN_APP=1
+if [[ -z "$BUILD_ARCH" ]]; then
+	if [[ "$PROFILE" == "release" || "$PROFILE" == "release-opt" ]]; then
+		BUILD_ARCH="universal"
+	else
+		BUILD_ARCH="native"
+	fi
 fi
+
+resolve_native_target() {
+	case "$(uname -m)" in
+	arm64 | aarch64)
+		echo "aarch64-apple-darwin"
+		;;
+	x86_64)
+		echo "x86_64-apple-darwin"
+		;;
+	*)
+		echo "Unsupported macOS architecture: $(uname -m)" >&2
+		exit 1
+		;;
+	esac
+}
+
+resolve_build_targets() {
+	case "$BUILD_ARCH" in
+	universal)
+		echo "aarch64-apple-darwin x86_64-apple-darwin"
+		;;
+	native)
+		echo "$(resolve_native_target)"
+		;;
+	arm64)
+		echo "aarch64-apple-darwin"
+		;;
+	x86_64)
+		echo "x86_64-apple-darwin"
+		;;
+	*)
+		echo "Unsupported BUILD_ARCH=$BUILD_ARCH (expected: universal, native, arm64, x86_64)" >&2
+		exit 1
+		;;
+	esac
+}
+
+require_command() {
+	if ! command -v "$1" >/dev/null 2>&1; then
+		echo "Missing required command: $1" >&2
+		echo "Install the Rust toolchain bootstrap first, then retry." >&2
+		echo "See CONTRIBUTING.md for setup instructions." >&2
+		exit 1
+	fi
+}
+
+ensure_rust_targets() {
+	local installed
+	local missing=()
+
+	installed="$(rustup target list --installed)"
+	for target in "$@"; do
+		if ! grep -Fxq "$target" <<<"$installed"; then
+			missing+=("$target")
+		fi
+	done
+
+	if [[ ${#missing[@]} -gt 0 ]]; then
+		echo "Installing missing Rust targets: ${missing[*]}"
+		rustup target add "${missing[@]}"
+	fi
+}
+
+for arg in "$@"; do
+	case "$arg" in
+	--open) OPEN_APP=1 ;;
+	--app-only) APP_ONLY=1 ;;
+	--native-arch) BUILD_ARCH="native" ;;
+	esac
+done
+
+require_command cargo
+require_command rustup
 
 APP_BUNDLE_SRC="assets/macos/Kaku.app"
 APP_BUNDLE_OUT="$OUT_DIR/$APP_NAME.app"
 
-echo "[1/6] Building binaries ($PROFILE)..."
+echo "[1/7] Building binaries ($PROFILE, $BUILD_ARCH)..."
+PROFILE_DIR="debug"
+CARGO_PROFILE_ARGS=()
 if [[ "$PROFILE" == "release" ]]; then
-	cargo build --release -p kaku-gui -p kaku
-	BIN_DIR="$TARGET_DIR/release"
+	CARGO_PROFILE_ARGS=(--release)
+	PROFILE_DIR="release"
 elif [[ "$PROFILE" == "release-opt" ]]; then
-	cargo build --profile release-opt -p kaku-gui -p kaku
-	BIN_DIR="$TARGET_DIR/release-opt"
-else
-	cargo build -p kaku-gui -p kaku
-	BIN_DIR="$TARGET_DIR/debug"
+	CARGO_PROFILE_ARGS=(--profile release-opt)
+	PROFILE_DIR="release-opt"
 fi
 
-echo "[2/6] Preparing app bundle..."
+if ! BUILD_TARGETS_STR="$(resolve_build_targets)"; then
+	exit 1
+fi
+
+BUILD_TARGETS=()
+IFS=' ' read -r -a BUILD_TARGETS <<<"$BUILD_TARGETS_STR"
+if [[ ${#BUILD_TARGETS[@]} -eq 0 ]]; then
+	echo "No build targets resolved for BUILD_ARCH=$BUILD_ARCH" >&2
+	exit 1
+fi
+
+ensure_rust_targets "${BUILD_TARGETS[@]}"
+
+for target in "${BUILD_TARGETS[@]}"; do
+	echo "Building target: $target"
+	CARGO_TERM_PROGRESS_WHEN=auto cargo build --locked ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} --target "$target" --target-dir "$TARGET_DIR" -p kaku-gui -p kaku
+done
+
+if [[ "$BUILD_ARCH" == "universal" ]]; then
+	BIN_DIR="$TARGET_DIR/universal/$PROFILE_DIR"
+	mkdir -p "$BIN_DIR"
+	for bin in kaku kaku-gui; do
+		lipo -create \
+			-output "$BIN_DIR/$bin" \
+			"$TARGET_DIR/aarch64-apple-darwin/$PROFILE_DIR/$bin" \
+			"$TARGET_DIR/x86_64-apple-darwin/$PROFILE_DIR/$bin"
+		chmod +x "$BIN_DIR/$bin"
+	done
+else
+	BIN_DIR="$TARGET_DIR/${BUILD_TARGETS[0]}/$PROFILE_DIR"
+fi
+
+for bin in kaku kaku-gui; do
+	echo -n "Built $bin: "
+	lipo -info "$BIN_DIR/$bin"
+done
+
+echo "[2/7] Preparing app bundle..."
 rm -rf "$APP_BUNDLE_OUT"
 mkdir -p "$OUT_DIR"
 cp -R "$APP_BUNDLE_SRC" "$APP_BUNDLE_OUT"
@@ -48,7 +168,7 @@ fi
 mkdir -p "$APP_BUNDLE_OUT/Contents/MacOS"
 mkdir -p "$APP_BUNDLE_OUT/Contents/Resources"
 
-echo "[2.5/6] Syncing version from Cargo.toml..."
+echo "[2.5/7] Syncing version from Cargo.toml..."
 # Extract version from kaku/Cargo.toml (assuming it's the source of truth)
 VERSION=$(grep '^version =' kaku/Cargo.toml | head -n 1 | cut -d '"' -f2)
 if [[ -n "$VERSION" ]]; then
@@ -59,15 +179,22 @@ else
 	echo "Warning: Could not detect version from kaku/Cargo.toml"
 fi
 
-echo "[3/6] Downloading vendor dependencies..."
+echo "[3/7] Downloading vendor plugins..."
 ./scripts/download_vendor.sh
 
-echo "[4/6] Copying resources and binaries..."
+echo "[4/7] Copying resources and binaries..."
 cp -R assets/shell-integration/* "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/shell-completion "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/fonts "$APP_BUNDLE_OUT/Contents/Resources/"
 mkdir -p "$APP_BUNDLE_OUT/Contents/Resources/vendor"
-cp -R assets/vendor/* "$APP_BUNDLE_OUT/Contents/Resources/vendor/"
+for vendor_item in starship.toml zsh-z zsh-autosuggestions zsh-syntax-highlighting zsh-completions; do
+	src_path="assets/vendor/$vendor_item"
+	if [[ -e "$src_path" ]]; then
+		cp -R "$src_path" "$APP_BUNDLE_OUT/Contents/Resources/vendor/"
+	else
+		echo "Warning: missing vendor item: $src_path"
+	fi
+done
 cp assets/shell-integration/first_run.sh "$APP_BUNDLE_OUT/Contents/Resources/"
 chmod +x "$APP_BUNDLE_OUT/Contents/Resources/first_run.sh"
 
@@ -86,14 +213,75 @@ done
 # Clean up xattrs to prevent icon caching issues or quarantine
 xattr -cr "$APP_BUNDLE_OUT"
 
-echo "[5/6] Signing app bundle..."
-codesign --force --deep --sign - "$APP_BUNDLE_OUT"
+echo "[5/7] Signing app bundle..."
+# Signing strategy:
+# - Dev builds (PROFILE=dev): Always use ad-hoc signing (-) for speed
+# - Release builds (PROFILE=release/release-opt): Use KAKU_SIGNING_IDENTITY if set, otherwise ad-hoc
+# Usage with developer certificate:
+#   KAKU_SIGNING_IDENTITY="Apple Development: Your Name" ./scripts/build.sh
+if [[ "$PROFILE" == "dev" || "$PROFILE" == "debug" ]]; then
+	SIGNING_IDENTITY="-"
+	echo "Dev build: using ad-hoc signing"
+else
+	SIGNING_IDENTITY="${KAKU_SIGNING_IDENTITY:--}"
+	if [[ "$SIGNING_IDENTITY" != "-" ]]; then
+		echo "Release build: signing with developer certificate"
+	else
+		if [[ "$KAKU_REQUIRE_SIGNED_RELEASE" == "1" ]]; then
+			echo "Error: release build requires KAKU_SIGNING_IDENTITY with a Developer ID certificate" >&2
+			exit 1
+		fi
+		echo "Release build: using ad-hoc signing (set KAKU_SIGNING_IDENTITY for developer certificate)"
+	fi
+fi
+
+SIGN_ARGS=(
+	--force
+	--deep
+	--options runtime
+	--entitlements assets/macos/Kaku.entitlements
+	--sign "$SIGNING_IDENTITY"
+)
+
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+	BUNDLE_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_BUNDLE_OUT/Contents/Info.plist" 2>/dev/null || true)"
+	if [[ -n "$BUNDLE_ID" ]]; then
+		# Keep designated requirement stable across local ad-hoc builds so macOS TCC
+		# does not treat each rebuilt app as a brand-new identity.
+		SIGN_ARGS+=("-r=designated => identifier \"$BUNDLE_ID\"")
+		echo "Ad-hoc signing with stable designated requirement: $BUNDLE_ID"
+	else
+		echo "Warning: CFBundleIdentifier not found. Falling back to default ad-hoc requirement."
+	fi
+fi
+
+codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE_OUT"
 
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
 touch "$APP_BUNDLE_OUT"
 
-echo "[6/6] Creating DMG..."
+if [[ "$APP_ONLY" == "1" ]]; then
+	echo "App bundle ready: $APP_BUNDLE_OUT"
+	if [[ "$OPEN_APP" == "1" ]]; then open "$APP_BUNDLE_OUT"; fi
+	exit 0
+fi
+
+UPDATE_ZIP_NAME="kaku_for_update.zip"
+UPDATE_ZIP_PATH="$OUT_DIR/$UPDATE_ZIP_NAME"
+UPDATE_SHA_PATH="$OUT_DIR/${UPDATE_ZIP_NAME}.sha256"
+
+echo "[6/7] Creating auto-update archive..."
+rm -f "$UPDATE_ZIP_PATH" "$UPDATE_SHA_PATH"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE_OUT" "$UPDATE_ZIP_PATH"
+(
+	cd "$OUT_DIR"
+	/usr/bin/shasum -a 256 "$UPDATE_ZIP_NAME" >"$(basename "$UPDATE_SHA_PATH")"
+)
+echo "Update archive created: $UPDATE_ZIP_PATH"
+echo "Update checksum created: $UPDATE_SHA_PATH"
+
+echo "[7/7] Creating DMG..."
 DMG_NAME="$APP_NAME.dmg"
 DMG_PATH="$OUT_DIR/$DMG_NAME"
 DMG_BASE_PATH="$OUT_DIR/$APP_NAME"
@@ -151,8 +339,8 @@ tell application "Finder"
 		try
 			set background picture of viewOptions to file ".background:${background_name}"
 		end try
-		set position of item "${app_name}.app" of container window to {190, 250}
-		set position of item "Applications" of container window to {500, 250}
+		set position of item "${app_name}.app" of container window to {190, 245}
+		set position of item "Applications" of container window to {500, 245}
 		close
 		open
 		update without registering applications

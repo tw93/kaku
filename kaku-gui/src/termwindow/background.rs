@@ -1,6 +1,6 @@
 use crate::color::LinearRgba;
 use crate::glyphcache::LoadState;
-use crate::quad::{QuadAllocator, QuadTrait};
+use crate::quad::{QuadTrait, TripleLayerQuadAllocatorTrait};
 use crate::termwindow::RenderState;
 use crate::utilsprites::RenderMetrics;
 use crate::Dimensions;
@@ -20,6 +20,10 @@ lazy_static::lazy_static! {
     static ref IMAGE_CACHE: Mutex<HashMap<String, CachedImage>> = Mutex::new(HashMap::new());
     static ref GRADIENT_CACHE: Mutex<Vec<CachedGradient>> = Mutex::new(vec![]);
 }
+
+// Hard limits to prevent unbounded cache growth during extreme config switching
+const MAX_IMAGE_CACHE_ENTRIES: usize = 32;
+const MAX_GRADIENT_CACHE_ENTRIES: usize = 32;
 
 struct CachedGradient {
     g: Gradient,
@@ -161,6 +165,11 @@ impl CachedGradient {
 
         let image = Self::compute(g, width, height)?;
 
+        // Enforce hard limit to prevent unbounded growth
+        if cache.len() >= MAX_GRADIENT_CACHE_ENTRIES {
+            cache.clear();
+        }
+
         cache.push(Self {
             g: g.clone(),
             width,
@@ -210,6 +219,11 @@ impl CachedImage {
         let mut data = ImageDataType::EncodedFile(data);
         data.adjust_speed(speed);
         let image = Arc::new(ImageData::with_data(data));
+
+        // Enforce hard limit to prevent unbounded growth
+        if cache.len() >= MAX_IMAGE_CACHE_ENTRIES {
+            cache.clear();
+        }
 
         cache.insert(
             path.to_string(),
@@ -420,8 +434,7 @@ impl crate::TermWindow {
         top: StableRowIndex,
     ) -> anyhow::Result<bool> {
         let render_layer = gl_state.layer_for_zindex(layer_index)?;
-        let vbs = render_layer.vb.borrow();
-        let mut layer0 = vbs[0].map();
+        let mut layers = render_layer.quad_allocator();
 
         let color = bg_color.mul_alpha(layer.def.opacity);
 
@@ -559,7 +572,7 @@ impl crate::TermWindow {
                     break;
                 }
                 let origin_x = origin_x + offset_x;
-                let mut quad = layer0.allocate()?;
+                let mut quad = layers.allocate(0)?;
                 emitted = true;
                 // log::info!("quad {origin_x},{origin_y} {width}x{height}");
                 quad.set_position(origin_x, origin_y, origin_x + width, origin_y + height);

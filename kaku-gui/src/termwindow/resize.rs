@@ -3,6 +3,7 @@ use crate::utilsprites::RenderMetrics;
 use ::window::{Dimensions, ResizeIncrement, Window, WindowOps, WindowState};
 use config::{ConfigHandle, DimensionContext};
 use mux::Mux;
+use std::path::PathBuf;
 use std::rc::Rc;
 use wezterm_font::FontConfiguration;
 use wezterm_term::TerminalSize;
@@ -42,24 +43,45 @@ impl super::TermWindow {
             return;
         }
         if self.dimensions == dimensions && self.window_state == window_state {
-            // It didn't really change
-            log::trace!("dimensions didn't change NOP!");
+            // Even if the geometry didn't change, live resize state transitions
+            // still matter for flushing deferred work.
+            let was_live_resizing = self.live_resizing;
+            self.live_resizing = live_resizing;
+
+            if was_live_resizing && !live_resizing {
+                if self.pending_config_reload_after_resize {
+                    self.pending_config_reload_after_resize = false;
+                    self.schedule_silent_config_reload(window);
+                }
+                self.emit_window_event("window-resized", None);
+            }
+
+            log::trace!("dimensions/window_state didn't change NOP!");
             return;
         }
         let last_state = self.window_state;
         self.window_state = window_state;
+        self.live_resizing = live_resizing;
         self.quad_generation += 1;
-        if last_state != self.window_state {
-            self.load_os_parameters();
-        }
+        // Refresh per-screen OS parameters (eg: safe-area/border metrics)
+        // on each resize so dragging between monitors doesn't use stale values.
+        self.load_os_parameters();
+        let fullscreen_transition = last_state.contains(WindowState::FULL_SCREEN)
+            != self.window_state.contains(WindowState::FULL_SCREEN);
 
         if let Some(webgpu) = self.webgpu.as_mut() {
-            webgpu.resize(dimensions, live_resizing);
+            webgpu.resize(dimensions);
         }
 
-        // For simple, user-interactive resizes where the dpi doesn't change,
-        // skip our scaling recalculation
-        if live_resizing && self.dimensions.dpi == dimensions.dpi {
+        // Align fullscreen transition handling with maximize/restore behavior:
+        // keep current dpi for this transition frame so text doesn't pop larger/smaller.
+        if fullscreen_transition && self.dimensions.dpi != dimensions.dpi {
+            let mut stabilized = dimensions;
+            stabilized.dpi = self.dimensions.dpi;
+            self.apply_dimensions(&stabilized, None, window);
+        } else if live_resizing && self.dimensions.dpi == dimensions.dpi {
+            // For simple, user-interactive resizes where the dpi doesn't change,
+            // skip our scaling recalculation.
             self.apply_dimensions(&dimensions, None, window);
         } else {
             self.scaling_changed(dimensions, self.fonts.get_font_scale(), window);
@@ -67,7 +89,13 @@ impl super::TermWindow {
         if let Some(modal) = self.get_modal() {
             modal.reconfigure(self);
         }
-        self.emit_window_event("window-resized", None);
+        if !live_resizing {
+            if self.pending_config_reload_after_resize {
+                self.pending_config_reload_after_resize = false;
+                self.schedule_silent_config_reload(window);
+            }
+            self.emit_window_event("window-resized", None);
+        }
     }
 
     pub fn apply_pending_scale_changes(&mut self) {
@@ -168,6 +196,7 @@ impl super::TermWindow {
         } else {
             0.
         };
+        let tab_bar_height_px = tab_bar_height as usize;
 
         let border = self.get_os_border();
 
@@ -196,9 +225,13 @@ impl super::TermWindow {
                 pixel_cell: self.render_metrics.cell_size.height as f32,
             };
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
-            let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-            let padding_bottom =
-                config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+            let (padding_top, padding_bottom) = effective_vertical_padding(
+                config,
+                v_context,
+                self.show_tab_bar,
+                self.config.tab_bar_at_bottom,
+                tab_bar_height_px,
+            );
             let padding_right = effective_right_padding(&config, h_context);
 
             let pixel_height = (rows * self.render_metrics.cell_size.height as usize)
@@ -242,9 +275,13 @@ impl super::TermWindow {
                 pixel_cell: self.render_metrics.cell_size.height as f32,
             };
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
-            let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-            let padding_bottom =
-                config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+            let (padding_top, padding_bottom) = effective_vertical_padding(
+                config,
+                v_context,
+                self.show_tab_bar,
+                self.config.tab_bar_at_bottom,
+                tab_bar_height_px,
+            );
             let padding_right = effective_right_padding(&config, h_context);
 
             let avail_width = dimensions.pixel_width.saturating_sub(
@@ -452,6 +489,8 @@ impl super::TermWindow {
             // Now revise the pty size to fit the window
             self.apply_dimensions(&dimensions, None, window);
         }
+
+        persist_current_font_size(&self.config, self.fonts.get_font_scale());
     }
 
     pub fn decrease_font_size(&mut self) {
@@ -506,8 +545,13 @@ impl super::TermWindow {
             pixel_cell: render_metrics.cell_size.height as f32,
         };
         let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
-        let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let (padding_top, padding_bottom) = effective_vertical_padding(
+            config,
+            v_context,
+            show_tab_bar,
+            config.tab_bar_at_bottom,
+            tab_bar_height,
+        );
 
         let dimensions = Dimensions {
             pixel_width: ((terminal_size.cols as usize * render_metrics.cell_size.width as usize)
@@ -555,6 +599,130 @@ impl super::TermWindow {
     }
 }
 
+fn font_size_state_file() -> PathBuf {
+    config::CONFIG_DIRS
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config::HOME_DIR.join(".config").join("kaku"))
+        .join(".kaku_font_size")
+}
+
+fn persist_current_font_size(config: &ConfigHandle, font_scale: f64) {
+    let file_name = font_size_state_file();
+
+    if (font_scale - 1.0).abs() < 0.0001 {
+        if let Err(err) = std::fs::remove_file(&file_name) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "Failed to clear persisted font size at {:?}: {:#}",
+                    file_name,
+                    err
+                );
+            }
+        }
+        return;
+    }
+
+    if let Some(parent) = file_name.parent() {
+        if let Err(err) = config::create_user_owned_dirs(parent) {
+            log::warn!(
+                "Failed to create config directory for persisted font size {:?}: {:#}",
+                parent,
+                err
+            );
+            return;
+        }
+    }
+
+    let font_size = config.font_size * font_scale;
+    if !font_size.is_finite() || font_size <= 0.0 {
+        return;
+    }
+
+    if let Err(err) = std::fs::write(&file_name, format!("{font_size:.3}\n")) {
+        log::warn!(
+            "Failed to persist font size {} to {:?}: {:#}",
+            font_size,
+            file_name,
+            err
+        );
+    }
+}
+
+pub(super) fn load_persisted_font_scale(config: &ConfigHandle) -> Option<f64> {
+    let file_name = font_size_state_file();
+    let saved_font_size = std::fs::read_to_string(&file_name)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())?;
+
+    if !saved_font_size.is_finite() || !(2.0..=256.0).contains(&saved_font_size) {
+        log::warn!(
+            "Ignoring invalid persisted font size {} from {:?}",
+            saved_font_size,
+            file_name
+        );
+        return None;
+    }
+
+    if !config.font_size.is_finite() || config.font_size <= 0.0 {
+        return None;
+    }
+
+    let scale = saved_font_size / config.font_size;
+    if !scale.is_finite() || !(0.1..=20.0).contains(&scale) {
+        log::warn!(
+            "Ignoring invalid persisted font scale {} from {:?}",
+            scale,
+            file_name
+        );
+        return None;
+    }
+
+    Some(scale)
+}
+
+/// Visual spacing adjustment for tab bar layouts.
+const VISUAL_SPACING: usize = 4;
+
+fn effective_top_padding(base_top: usize, default_top: usize) -> usize {
+    if base_top == default_top {
+        base_top + VISUAL_SPACING
+    } else {
+        base_top
+    }
+}
+
+/// Computes vertical padding used for layout.
+/// Tab bar height is subtracted from the side where it appears,
+/// keeping content spacing stable when tab bar visibility changes.
+pub fn effective_vertical_padding(
+    config: &ConfigHandle,
+    context: DimensionContext,
+    show_tab_bar: bool,
+    tab_bar_at_bottom: bool,
+    tab_bar_height: usize,
+) -> (usize, usize) {
+    let base_top = config.window_padding.top.evaluate_as_pixels(context) as usize;
+    let base_bottom = config.window_padding.bottom.evaluate_as_pixels(context) as usize;
+    let default_top = config::WindowPadding::default()
+        .top
+        .evaluate_as_pixels(context) as usize;
+
+    let mut top = effective_top_padding(base_top, default_top);
+    let mut bottom = base_bottom;
+
+    // Subtract tab bar height from its side to keep content spacing stable.
+    if show_tab_bar && tab_bar_height > 0 {
+        if tab_bar_at_bottom {
+            bottom = bottom.saturating_sub(tab_bar_height);
+        } else {
+            top = top.saturating_sub(tab_bar_height);
+        }
+    }
+
+    (top, bottom)
+}
+
 /// Computes the effective padding for the RHS.
 /// This is needed because the default is 0, but if the user has
 /// enabled the scroll bar then they will expect it to have a reasonable
@@ -564,5 +732,82 @@ pub fn effective_right_padding(config: &ConfigHandle, context: DimensionContext)
         context.pixel_cell as usize
     } else {
         config.window_padding.right.evaluate_as_pixels(context) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_top_padding, effective_vertical_padding};
+    use config::{ConfigHandle, DimensionContext};
+
+    fn context() -> DimensionContext {
+        DimensionContext {
+            dpi: 96.0,
+            pixel_max: 800.0,
+            pixel_cell: 16.0,
+        }
+    }
+
+    fn base_vertical_padding(config: &ConfigHandle) -> (usize, usize) {
+        (
+            config.window_padding.top.evaluate_as_pixels(context()) as usize,
+            config.window_padding.bottom.evaluate_as_pixels(context()) as usize,
+        )
+    }
+
+    #[test]
+    fn top_tab_mode_adjusts_top_even_when_tab_bar_hidden() {
+        let config = ConfigHandle::default_config();
+        let (base_top, base_bottom) = base_vertical_padding(&config);
+
+        let (top, bottom) = effective_vertical_padding(&config, context(), false, false, 24);
+
+        assert_eq!(top, base_top + 4);
+        assert_eq!(bottom, base_bottom);
+    }
+
+    #[test]
+    fn explicit_top_padding_can_disable_visual_spacing() {
+        assert_eq!(effective_top_padding(0, 8), 0);
+        assert_eq!(effective_top_padding(12, 8), 12);
+    }
+
+    #[test]
+    fn top_tab_bar_visible_adjusts_top_and_bottom_padding() {
+        let config = ConfigHandle::default_config();
+        let tab_bar_height = 24;
+        let (base_top, base_bottom) = base_vertical_padding(&config);
+
+        let (with_tab_top, with_tab_bottom) =
+            effective_vertical_padding(&config, context(), true, false, tab_bar_height);
+
+        assert_eq!(with_tab_top, (base_top + 4).saturating_sub(tab_bar_height));
+        assert_eq!(with_tab_bottom, base_bottom);
+    }
+
+    #[test]
+    fn bottom_tab_bar_adjusts_padding_even_when_hidden() {
+        let config = ConfigHandle::default_config();
+        let (base_top, base_bottom) = base_vertical_padding(&config);
+        let (with_bottom_top, with_bottom_bottom) =
+            effective_vertical_padding(&config, context(), false, true, 24);
+
+        assert_eq!(with_bottom_top, base_top + 4);
+        assert_eq!(with_bottom_bottom, base_bottom);
+    }
+
+    #[test]
+    fn bottom_tab_bar_visible_also_subtracts_tab_bar_height() {
+        let config = ConfigHandle::default_config();
+        let tab_bar_height = 24;
+        let (_, base_bottom) = base_vertical_padding(&config);
+
+        let (_, with_bottom_bottom) =
+            effective_vertical_padding(&config, context(), true, true, tab_bar_height);
+
+        assert_eq!(
+            with_bottom_bottom,
+            base_bottom.saturating_sub(tab_bar_height)
+        );
     }
 }

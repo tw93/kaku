@@ -344,11 +344,6 @@ impl crate::TermWindow {
             pixel_max: self.terminal_size.pixel_width as f32,
             pixel_cell: self.render_metrics.cell_size.width as f32,
         };
-        let v_context = DimensionContext {
-            dpi: self.dimensions.dpi as f32,
-            pixel_max: self.terminal_size.pixel_height as f32,
-            pixel_cell: self.render_metrics.cell_size.height as f32,
-        };
 
         let padding_left = self
             .config
@@ -356,12 +351,14 @@ impl crate::TermWindow {
             .left
             .evaluate_as_pixels(h_context);
         let padding_right = self.config.window_padding.right;
-        let padding_top = self.config.window_padding.top.evaluate_as_pixels(v_context);
-        let padding_bottom = self
-            .config
-            .window_padding
-            .bottom
-            .evaluate_as_pixels(v_context);
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.) as usize
+        } else {
+            0
+        };
+        let (padding_top, padding_bottom) = self.effective_vertical_padding();
+        let padding_top = padding_top as f32;
+        let padding_bottom = padding_bottom as f32;
 
         let horizontal_gap = self.dimensions.pixel_width as f32
             - self.terminal_size.pixel_width as f32
@@ -376,7 +373,7 @@ impl crate::TermWindow {
             - padding_top
             - padding_bottom
             - if self.show_tab_bar {
-                self.tab_bar_pixel_height().unwrap_or(0.)
+                tab_bar_height as f32
             } else {
                 0.
             };
@@ -392,6 +389,12 @@ impl crate::TermWindow {
         };
 
         (padding_left + left_gap, padding_top + top_gap)
+    }
+
+    /// Returns the pixel x-position where terminal content begins.
+    pub fn content_left_inset(&self) -> f32 {
+        let (padding_left, _) = self.padding_left_top();
+        padding_left + self.get_os_border().left.get() as f32
     }
 
     fn resolve_lock_glyph(
@@ -567,10 +570,33 @@ impl crate::TermWindow {
                 };
             }
 
-            let dead_key_or_leader =
-                self.dead_key_status != DeadKeyStatus::None || self.leader_is_active();
+            let dead_key_active = self.dead_key_status != DeadKeyStatus::None;
 
-            if dead_key_or_leader && params.is_active_pane {
+            if dead_key_active && params.is_active_pane {
+                let fg_color = self.ensure_min_contrast(params.fg_color, params.bg_color);
+
+                let color = params
+                    .config
+                    .resolved_palette
+                    .compose_cursor
+                    .map(|c| c.to_linear())
+                    .unwrap_or(params.cursor_border_color);
+
+                return ComputeCellFgBgResult {
+                    fg_color,
+                    fg_color_alt: fg_color,
+                    fg_color_mix: 0.,
+                    bg_color: params.bg_color,
+                    bg_color_alt: params.bg_color,
+                    bg_color_mix: 0.,
+                    cursor_shape: Some(CursorShape::SteadyUnderline),
+                    cursor_border_color: color,
+                    cursor_border_color_alt: color,
+                    cursor_border_mix: 0.,
+                };
+            }
+
+            if self.leader_is_active() && params.is_active_pane {
                 let (fg_color, bg_color) = if self.use_reverse_video_cursor(&params) {
                     (params.bg_color, params.fg_color)
                 } else {
@@ -683,6 +709,8 @@ impl crate::TermWindow {
             let (intensity, next) = color_ease.intensity_continuous();
 
             cursor_border_mix = intensity;
+            // Blend the cursor towards the cell background color.
+            // This keeps blinking behavior consistent across AA modes.
             cursor_border_color_alt = params.bg_color;
 
             if matches!(
@@ -708,12 +736,12 @@ impl crate::TermWindow {
             cursor_border_mix,
             cursor_shape: if visibility == CursorVisibility::Visible {
                 match cursor_shape {
+                    // Render block cursor with the default sprite so it blinks as a full cell.
                     CursorShape::BlinkingBlock | CursorShape::SteadyBlock if focused_and_active => {
                         Some(CursorShape::Default)
                     }
-                    // When not focused, convert bar to block to make it more visually
-                    // distinct from the focused bar in another pane
-                    _shape if !focused_and_active => Some(CursorShape::SteadyBlock),
+                    // Keep inactive panes cursorless for a cleaner split view.
+                    _shape if !focused_and_active => None,
                     shape => Some(shape),
                 }
             } else {

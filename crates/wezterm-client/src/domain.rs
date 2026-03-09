@@ -3,7 +3,7 @@ use crate::pane::ClientPane;
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use codec::{ListPanesResponse, SpawnV2, SplitPane};
-use config::keyassignment::SpawnTabDomain;
+use config::keyassignment::{PaneEncoding, SpawnTabDomain};
 use config::{SshDomain, TlsDomainClient, UnixDomain};
 use mux::connui::{ConnectionUI, ConnectionUIParams};
 use mux::domain::{alloc_domain_id, Domain, DomainId, DomainState, SplitSource};
@@ -119,7 +119,7 @@ impl ClientInner {
         None
     }
 
-    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<TabId> {
+    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<PaneId> {
         let mut pane_map = self.remote_to_local_pane.lock().unwrap();
 
         if let Some(id) = pane_map.get(&remote_pane_id) {
@@ -423,7 +423,7 @@ impl ClientDomain {
         mux.domain_was_detached(self.local_domain_id);
     }
 
-    pub fn remote_to_local_pane_id(&self, remote_pane_id: TabId) -> Option<TabId> {
+    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<PaneId> {
         let inner = self.inner()?;
         inner.remote_to_local_pane_id(remote_pane_id)
     }
@@ -522,14 +522,14 @@ impl ClientDomain {
             .keys()
             .copied()
             .collect();
-        let mut remote_tabs_to_forget: HashSet<WindowId> = inner
+        let mut remote_tabs_to_forget: HashSet<TabId> = inner
             .remote_to_local_tab
             .lock()
             .unwrap()
             .keys()
             .copied()
             .collect();
-        let mut remote_panes_to_forget: HashSet<WindowId> = inner
+        let mut remote_panes_to_forget: HashSet<PaneId> = inner
             .remote_to_local_pane
             .lock()
             .unwrap()
@@ -753,9 +753,11 @@ impl Domain for ClientDomain {
 
     async fn spawn_pane(
         &self,
+        _mux: &Mux,
         _size: TerminalSize,
         _command: Option<CommandBuilder>,
         _command_dir: Option<String>,
+        _encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         anyhow::bail!("spawn_pane not implemented for ClientDomain")
     }
@@ -816,16 +818,18 @@ impl Domain for ClientDomain {
 
     async fn spawn(
         &self,
+        mux: &Mux,
         size: TerminalSize,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        _encoding: PaneEncoding,
         window: WindowId,
     ) -> anyhow::Result<Arc<Tab>> {
         let inner = self
             .inner()
             .ok_or_else(|| anyhow!("domain is not attached"))?;
 
-        let workspace = Mux::get().active_workspace();
+        let workspace = mux.active_workspace();
 
         let result = inner
             .client
@@ -853,7 +857,6 @@ impl Domain for ClientDomain {
         inner.remove_old_tab_mapping(result.tab_id);
         inner.record_remote_to_local_tab_mapping(result.tab_id, tab.tab_id());
 
-        let mux = Mux::get();
         mux.add_tab_and_active_pane(&tab)?;
         mux.add_tab_to_window(&tab, window)?;
 
@@ -862,6 +865,7 @@ impl Domain for ClientDomain {
 
     async fn split_pane(
         &self,
+        mux: &Mux,
         source: SplitSource,
         tab_id: TabId,
         pane_id: PaneId,
@@ -870,8 +874,6 @@ impl Domain for ClientDomain {
         let inner = self
             .inner()
             .ok_or_else(|| anyhow!("domain is not attached"))?;
-
-        let mux = Mux::get();
 
         let tab = mux
             .get_tab(tab_id)

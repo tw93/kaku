@@ -1,14 +1,15 @@
 use crate::tabbar::TabBarItem;
+use crate::termwindow::tab_rename::TabRenameModal;
 use crate::termwindow::{
     GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
 };
 use ::window::{
-    MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress,
-    WindowDecorations, WindowOps, WindowState,
+    MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress, WindowOps,
+    WindowState,
 };
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::MouseEventAltScreen;
-use mux::pane::{Pane, WithPaneLines};
+use mux::pane::{CachePolicy, Pane, WithPaneLines};
 use mux::tab::SplitDirection;
 use mux::Mux;
 use mux_lua::MuxPane;
@@ -21,9 +22,139 @@ use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::Line;
 use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
-use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
+use wezterm_term::{ClickPosition, KeyCode, KeyModifiers, LastMouseClick, StableRowIndex};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseDispatchTarget {
+    Ui,
+    TitleArea,
+    Terminal,
+}
+
+fn mouse_dispatch_target(
+    has_ui_item: bool,
+    coords_y: isize,
+    terminal_origin_y: isize,
+    capture: Option<&super::MouseCapture>,
+) -> MouseDispatchTarget {
+    if matches!(capture, Some(super::MouseCapture::TerminalPane(_))) {
+        MouseDispatchTarget::Terminal
+    } else if has_ui_item {
+        MouseDispatchTarget::Ui
+    } else if coords_y < terminal_origin_y {
+        MouseDispatchTarget::TitleArea
+    } else {
+        MouseDispatchTarget::Terminal
+    }
+}
 
 impl super::TermWindow {
+    const TAB_DRAG_THRESHOLD: isize = 6;
+
+    fn finish_mouse_release(&mut self, press: MousePress) {
+        self.current_mouse_capture = None;
+        self.current_mouse_buttons.retain(|p| p != &press);
+    }
+
+    fn start_tab_drag(&mut self, tab_idx: usize, start_event: MouseEvent) {
+        self.tab_drag_state = Some(super::TabDragState {
+            tab_idx,
+            start_event,
+            has_dragged: false,
+        });
+    }
+
+    fn last_tab_index(&self) -> Option<usize> {
+        let mux = Mux::get();
+        let window = mux.get_window(self.mux_window_id)?;
+        let len = window.len();
+        (len > 0).then_some(len - 1)
+    }
+
+    fn tab_ui_item(&self, tab_idx: usize) -> Option<UIItem> {
+        self.ui_items.iter().find_map(|item| match item.item_type {
+            UIItemType::TabBar(TabBarItem::Tab {
+                tab_idx: item_tab_idx,
+                ..
+            }) if item_tab_idx == tab_idx => Some(item.clone()),
+            _ => None,
+        })
+    }
+
+    fn drag_tab_target_idx(&self, current_tab_idx: usize, cursor_x: isize) -> Option<usize> {
+        if let Some(prev_idx) = current_tab_idx.checked_sub(1) {
+            if let Some(prev) = self.tab_ui_item(prev_idx) {
+                let prev_mid_x = prev.x as isize + prev.width as isize / 2;
+                if cursor_x < prev_mid_x {
+                    return Some(prev_idx);
+                }
+            }
+        }
+
+        if current_tab_idx < self.last_tab_index()? {
+            if let Some(next) = self.tab_ui_item(current_tab_idx + 1) {
+                let next_mid_x = next.x as isize + next.width as isize / 2;
+                if cursor_x > next_mid_x {
+                    return Some(current_tab_idx + 1);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn begin_tab_rename(&mut self, tab_idx: usize, item: UIItem) -> anyhow::Result<()> {
+        let mux = Mux::get();
+        let window = mux
+            .get_window(self.mux_window_id)
+            .ok_or_else(|| anyhow::anyhow!("no such window"))?;
+        let tab = window
+            .get_by_idx(tab_idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no such tab index"))?;
+        drop(window);
+
+        let modal = TabRenameModal::new(self, tab.tab_id(), item)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    fn drag_tab(&mut self, event: &MouseEvent, context: &dyn WindowOps) -> bool {
+        let Some(mut state) = self.tab_drag_state.take() else {
+            return false;
+        };
+
+        if event.mouse_buttons != WMB::LEFT {
+            self.tab_drag_state = Some(state);
+            return false;
+        }
+
+        let delta_x = (event.coords.x - state.start_event.coords.x).abs();
+        let delta_y = (event.coords.y - state.start_event.coords.y).abs();
+        if !state.has_dragged && delta_x.max(delta_y) < Self::TAB_DRAG_THRESHOLD {
+            self.tab_drag_state = Some(state);
+            return true;
+        }
+
+        state.has_dragged = true;
+
+        let target_idx = self.drag_tab_target_idx(state.tab_idx, event.coords.x);
+
+        if let Some(target_idx) = target_idx {
+            if target_idx != state.tab_idx {
+                if let Err(err) = self.move_tab(target_idx) {
+                    log::debug!("move_tab({target_idx}) failed while dragging tab: {err:#}");
+                } else {
+                    state.tab_idx = target_idx;
+                    context.invalidate();
+                }
+            }
+        }
+
+        self.tab_drag_state = Some(state);
+        true
+    }
+
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
         let y = event.coords.y;
@@ -66,6 +197,9 @@ impl super::TermWindow {
         };
 
         self.current_mouse_event.replace(event.clone());
+        // Mouse interaction should cancel any synthetic prompt-selection state
+        // tracked from keyboard shortcuts (Cmd+A/Shift+Arrow, etc).
+        self.clear_line_editor_selection();
 
         let border = self.get_os_border();
 
@@ -76,6 +210,7 @@ impl super::TermWindow {
         } + border.top.get() as isize;
 
         let (padding_left, padding_top) = self.padding_left_top();
+        let terminal_origin_y = first_line_offset + padding_top as isize;
 
         let y = (event
             .coords
@@ -119,22 +254,93 @@ impl super::TermWindow {
 
         self.last_mouse_coords = (x, y);
 
+        // Keep modal focus exclusive: forward all mouse events to it and stop
+        // routing into pane/tab UI while active.
+        if let Some(modal) = self.get_modal() {
+            let modal_event = wezterm_term::MouseEvent {
+                kind: match event.kind {
+                    WMEK::Move => TMEK::Move,
+                    WMEK::VertWheel(_) | WMEK::HorzWheel(_) | WMEK::Press(_) => TMEK::Press,
+                    WMEK::Release(_) => TMEK::Release,
+                },
+                button: match event.kind {
+                    WMEK::Release(ref press) | WMEK::Press(ref press) => mouse_press_to_tmb(press),
+                    WMEK::Move => {
+                        if event.mouse_buttons == WMB::LEFT {
+                            TMB::Left
+                        } else if event.mouse_buttons == WMB::RIGHT {
+                            TMB::Right
+                        } else if event.mouse_buttons == WMB::MIDDLE {
+                            TMB::Middle
+                        } else {
+                            TMB::None
+                        }
+                    }
+                    WMEK::VertWheel(amount) => {
+                        if amount > 0 {
+                            TMB::WheelUp(amount as usize)
+                        } else {
+                            TMB::WheelDown((-amount) as usize)
+                        }
+                    }
+                    WMEK::HorzWheel(amount) => {
+                        if amount > 0 {
+                            TMB::WheelLeft(amount as usize)
+                        } else {
+                            TMB::WheelRight((-amount) as usize)
+                        }
+                    }
+                },
+                x,
+                y,
+                x_pixel_offset,
+                y_pixel_offset,
+                modifiers: event.modifiers,
+            };
+            if let Err(err) = modal.mouse_event(modal_event, self) {
+                log::error!("modal mouse event: {err:#}");
+            }
+            return;
+        }
+
         let mut capture_mouse = false;
+        let release_button = match &event.kind {
+            WMEK::Release(press) => Some(*press),
+            _ => None,
+        };
 
         match event.kind {
             WMEK::Release(ref press) => {
-                self.current_mouse_capture = None;
-                self.current_mouse_buttons.retain(|p| p != press);
                 if press == &MousePress::Left && self.edge_drag_in_progress {
                     self.edge_drag_in_progress = false;
+                    self.finish_mouse_release(*press);
                     return;
                 }
-                if press == &MousePress::Left && self.window_drag_position.take().is_some() {
-                    // Completed a window drag
-                    return;
+                if press == &MousePress::Left {
+                    let was_dragging_window = self.is_window_dragging;
+                    self.is_window_dragging = false;
+                    let had_manual_drag_anchor = self.window_drag_position.take().is_some();
+                    if had_manual_drag_anchor || was_dragging_window {
+                        // Completed a window drag
+                        self.finish_mouse_release(*press);
+                        return;
+                    }
                 }
                 if press == &MousePress::Left && self.dragging.take().is_some() {
-                    // Completed a drag
+                    // Completed a split drag: notify PTY of final sizes
+                    // using the tab_id captured at drag start.
+                    if let Some(state) = self.split_drag_state.take() {
+                        let mux = Mux::get();
+                        if let Some(tab) = mux.get_tab(state.tab_id) {
+                            tab.flush_pane_pty_sizes();
+                            context.invalidate();
+                        }
+                    }
+                    self.finish_mouse_release(*press);
+                    return;
+                }
+                if press == &MousePress::Left && self.tab_drag_state.take().is_some() {
+                    self.finish_mouse_release(*press);
                     return;
                 }
             }
@@ -147,9 +353,16 @@ impl super::TermWindow {
                 // Perform click counting
                 let button = mouse_press_to_tmb(press);
 
+                // Use sentinel row value for title/padding area clicks to prevent
+                // chaining with terminal first row (row=0) as a double-click
+                let click_row = if event.coords.y < terminal_origin_y {
+                    i64::MIN
+                } else {
+                    y
+                };
                 let click_position = ClickPosition {
                     column: x,
-                    row: y,
+                    row: click_row,
                     x_pixel_offset,
                     y_pixel_offset,
                 };
@@ -161,30 +374,67 @@ impl super::TermWindow {
                 self.last_mouse_click = Some(click);
                 self.current_mouse_buttons.retain(|p| p != press);
                 self.current_mouse_buttons.push(*press);
+
+                if press == &MousePress::Left
+                    && first_line_offset > 0
+                    && (event.coords.y as usize) < first_line_offset as usize
+                {
+                    // A left press in the title/tab strip may turn into a native
+                    // window drag. Enter drag-protection immediately so we don't
+                    // route follow-up motion/wheel into terminal selection/scroll.
+                    self.current_mouse_capture = Some(MouseCapture::UI);
+                    self.is_window_dragging = true;
+                }
             }
 
             WMEK::Move => {
                 if self.edge_drag_in_progress {
                     return;
                 }
-                if let Some(start) = self.window_drag_position.as_ref() {
-                    // Dragging the window
-                    // Compute the distance since the initial event
-                    let delta_x = start.screen_coords.x - event.screen_coords.x;
-                    let delta_y = start.screen_coords.y - event.screen_coords.y;
+                if let Some(start) = self.window_drag_position.clone() {
+                    if event.mouse_buttons != WMB::LEFT {
+                        self.window_drag_position = None;
+                        self.is_window_dragging = false;
+                        self.current_mouse_capture = None;
+                    } else {
+                        // Dragging the window
+                        // Compute the distance since the initial event
+                        let delta_x = start.screen_coords.x - event.screen_coords.x;
+                        let delta_y = start.screen_coords.y - event.screen_coords.y;
 
-                    // Now compute a new window position.
-                    // We don't have a direct way to get the position,
-                    // but we can infer it by comparing the mouse coords
-                    // with the screen coords in the initial event.
-                    // This computes the original top_left position,
-                    // and applies the total drag delta to it.
-                    let top_left = ::window::ScreenPoint::new(
-                        (start.screen_coords.x - start.coords.x) - delta_x,
-                        (start.screen_coords.y - start.coords.y) - delta_y,
-                    );
-                    // and now tell the window to go there
-                    context.set_window_position(top_left);
+                        // Now compute a new window position.
+                        // We don't have a direct way to get the position,
+                        // but we can infer it by comparing the mouse coords
+                        // with the screen coords in the initial event.
+                        // This computes the original top_left position,
+                        // and applies the total drag delta to it.
+                        let top_left = ::window::ScreenPoint::new(
+                            (start.screen_coords.x - start.coords.x) - delta_x,
+                            (start.screen_coords.y - start.coords.y) - delta_y,
+                        );
+                        // and now tell the window to go there
+                        context.set_window_position(top_left);
+                        return;
+                    }
+                }
+                if self.is_window_dragging {
+                    if event.mouse_buttons == WMB::NONE {
+                        // Defensive reset in case release was consumed by native drag.
+                        self.is_window_dragging = false;
+                        self.current_mouse_capture = None;
+                    } else {
+                        // We requested a native drag move; while it is active,
+                        // suppress terminal mouse handling to avoid accidental scrolling.
+                        return;
+                    }
+                }
+                if event.mouse_buttons != WMB::NONE
+                    && self.current_mouse_buttons.is_empty()
+                    && self.current_mouse_capture.is_none()
+                {
+                    // Ignore drag motion that started outside the terminal view
+                    // (for example, dragging the native title bar and crossing
+                    // into content), so we don't accidentally select/scroll.
                     return;
                 }
 
@@ -192,8 +442,29 @@ impl super::TermWindow {
                     self.drag_ui_item(item, start_event, x, y, event, context);
                     return;
                 }
+                if self.drag_tab(&event, context) {
+                    return;
+                }
             }
-            _ => {}
+            WMEK::VertWheel(_) | WMEK::HorzWheel(_) => {
+                if self.is_window_dragging {
+                    return;
+                }
+                if event.mouse_buttons != WMB::NONE
+                    && !matches!(
+                        self.current_mouse_capture,
+                        Some(MouseCapture::TerminalPane(_))
+                    )
+                {
+                    return;
+                }
+                if matches!(
+                    self.resolve_ui_item(&event).map(|item| item.item_type),
+                    Some(UIItemType::TabBar(_))
+                ) {
+                    return;
+                }
+            }
         }
 
         let prior_ui_item = self.last_ui_item.clone();
@@ -225,30 +496,79 @@ impl super::TermWindow {
             None
         };
 
-        if let Some(item) = ui_item.clone() {
-            if capture_mouse {
-                self.current_mouse_capture = Some(MouseCapture::UI);
-            }
-            self.mouse_event_ui_item(item, pane, y, event, context);
-        } else if matches!(
-            self.current_mouse_capture,
-            None | Some(MouseCapture::TerminalPane(_))
+        match mouse_dispatch_target(
+            ui_item.is_some(),
+            event.coords.y,
+            terminal_origin_y,
+            self.current_mouse_capture.as_ref(),
         ) {
-            self.mouse_event_terminal(
-                pane,
-                ClickPosition {
-                    column: x,
-                    row: y,
-                    x_pixel_offset,
-                    y_pixel_offset,
-                },
-                event,
-                context,
-                capture_mouse,
-            );
+            MouseDispatchTarget::Ui => {
+                let item = ui_item
+                    .clone()
+                    .expect("ui item must exist when dispatching to UI");
+                if capture_mouse {
+                    self.current_mouse_capture = Some(MouseCapture::UI);
+                }
+                self.mouse_event_ui_item(item, pane, y, event, context);
+            }
+            MouseDispatchTarget::TitleArea => {
+                // Event landed in title/padding area above terminal content but missed all UI items.
+                match event.kind {
+                    WMEK::Press(MousePress::Left) => {
+                        let maximized = self
+                            .window_state
+                            .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
+                        // Double-click title area to zoom window
+                        if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
+                            if let Some(ref window) = self.window {
+                                if maximized {
+                                    window.restore();
+                                } else {
+                                    window.maximize();
+                                }
+                            }
+                            return;
+                        }
+                        self.current_mouse_capture = Some(MouseCapture::UI);
+                        self.is_window_dragging = true;
+                        if !maximized && !cfg!(target_os = "macos") {
+                            self.window_drag_position.replace(event.clone());
+                        }
+                        context.request_drag_move();
+                        return;
+                    }
+                    WMEK::Move if self.current_mouse_capture.is_none() => {
+                        // Set Arrow cursor for move events when no capture is active.
+                        // Prevents macOS NSTextInputClient from defaulting to IBeam.
+                        context.set_cursor(Some(MouseCursor::Arrow));
+                    }
+                    _ => {}
+                }
+            }
+            MouseDispatchTarget::Terminal => {
+                self.mouse_event_terminal(
+                    pane,
+                    ClickPosition {
+                        column: x,
+                        row: y,
+                        x_pixel_offset,
+                        y_pixel_offset,
+                    },
+                    event,
+                    context,
+                    capture_mouse,
+                );
+            }
         }
 
-        if prior_ui_item != ui_item {
+        if let Some(press) = release_button {
+            // Keep the original capture alive until the release has been
+            // dispatched, otherwise drags that end outside the content area
+            // never complete the selection.
+            self.finish_mouse_release(press);
+        }
+
+        if prior_ui_item != ui_item && !self.is_window_dragging {
             self.update_title_post_status();
         }
     }
@@ -270,17 +590,41 @@ impl super::TermWindow {
         context: &dyn WindowOps,
     ) {
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
-            Some(tab) => tab,
-            None => return,
+
+        // On the first drag event, capture the tab_id from the active tab.
+        // All subsequent frames (and the final release) use this tab_id
+        // so we always operate on the same tab even if tabs switch mid-drag.
+        let tab = if let Some(ref state) = self.split_drag_state {
+            match mux.get_tab(state.tab_id) {
+                Some(tab) => tab,
+                None => {
+                    // The original tab was closed mid-drag. End this drag
+                    // instead of retargeting another tab with stale split metadata.
+                    self.split_drag_state = None;
+                    return;
+                }
+            }
+        } else {
+            let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                Some(tab) => tab,
+                None => return,
+            };
+            self.split_drag_state = Some(super::SplitDragState {
+                tab_id: tab.tab_id(),
+            });
+            tab
         };
+
         let delta = match split.direction {
             SplitDirection::Horizontal => (x as isize).saturating_sub(split.left as isize),
             SplitDirection::Vertical => (y as isize).saturating_sub(split.top as isize),
         };
 
         if delta != 0 {
-            tab.resize_split_by(split.index, delta);
+            // Use visual-only resize during drag: updates terminal state
+            // for smooth content reflow but does NOT notify the PTY,
+            // so the shell won't receive rapid SIGWINCH signals.
+            tab.resize_split_by_visual(split.index, delta);
             if let Some(split) = tab.iter_splits().into_iter().nth(split.index) {
                 item.item_type = UIItemType::Split(split);
                 context.invalidate();
@@ -372,9 +716,9 @@ impl super::TermWindow {
         context: &dyn WindowOps,
     ) {
         self.last_ui_item.replace(item.clone());
-        match item.item_type {
-            UIItemType::TabBar(item) => {
-                self.mouse_event_tab_bar(item, event, context);
+        match item.item_type.clone() {
+            UIItemType::TabBar(tab_bar_item) => {
+                self.mouse_event_tab_bar(tab_bar_item, item, event, context);
             }
             UIItemType::AboveScrollThumb => {
                 self.mouse_event_above_scroll_thumb(item, pane, event, context);
@@ -417,7 +761,7 @@ impl super::TermWindow {
         };
         let action = match button {
             MousePress::Left => Some(KeyAssignment::SpawnTab(SpawnTabDomain::CurrentPaneDomain)),
-            MousePress::Right => Some(KeyAssignment::ShowLauncher),
+            MousePress::Right => None,
             MousePress::Middle => None,
         };
 
@@ -465,24 +809,41 @@ impl super::TermWindow {
     pub fn mouse_event_tab_bar(
         &mut self,
         item: TabBarItem,
+        ui_item: UIItem,
         event: MouseEvent,
         context: &dyn WindowOps,
     ) {
         match event.kind {
             WMEK::Press(MousePress::Left) => match item {
-                TabBarItem::Tab { tab_idx, .. } => {
-                    self.activate_tab(tab_idx as isize).ok();
+                TabBarItem::Tab { tab_idx, active } => {
+                    if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
+                        self.tab_drag_state = None;
+                        if let Err(err) = self.begin_tab_rename(tab_idx, ui_item) {
+                            log::debug!("begin_tab_rename({tab_idx}) failed: {err:#}");
+                        }
+                        context.set_cursor(Some(MouseCursor::Arrow));
+                        return;
+                    }
+                    if !active {
+                        if let Err(err) = self.activate_tab(tab_idx as isize) {
+                            log::debug!("activate_tab({tab_idx}) failed: {err:#}");
+                        }
+                    }
+                    self.start_tab_drag(tab_idx, event.clone());
                 }
                 TabBarItem::NewTabButton { .. } => {
+                    self.tab_drag_state = None;
                     self.do_new_tab_button_click(MousePress::Left);
                 }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
+                    self.tab_drag_state = None;
                     let maximized = self
                         .window_state
                         .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
                     if let Some(ref window) = self.window {
                         if self.config.window_decorations
-                            == WindowDecorations::INTEGRATED_BUTTONS | WindowDecorations::RESIZE
+                            == window::WindowDecorations::INTEGRATED_BUTTONS
+                                | window::WindowDecorations::RESIZE
                         {
                             if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
                                 if maximized {
@@ -493,13 +854,14 @@ impl super::TermWindow {
                             }
                         }
                     }
-                    // Potentially starting a drag by the tab bar
-                    if !maximized {
+                    self.is_window_dragging = true;
+                    if !maximized && !cfg!(target_os = "macos") {
                         self.window_drag_position.replace(event.clone());
                     }
                     context.request_drag_move();
                 }
                 TabBarItem::WindowButton(button) => {
+                    self.tab_drag_state = None;
                     use window::IntegratedTitleButton as Button;
                     if let Some(ref window) = self.window {
                         match button {
@@ -521,9 +883,11 @@ impl super::TermWindow {
             },
             WMEK::Press(MousePress::Middle) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
+                    self.tab_drag_state = None;
                     self.close_specific_tab(tab_idx, true);
                 }
                 TabBarItem::NewTabButton { .. } => {
+                    self.tab_drag_state = None;
                     self.do_new_tab_button_click(MousePress::Middle);
                 }
                 TabBarItem::None
@@ -533,9 +897,11 @@ impl super::TermWindow {
             },
             WMEK::Press(MousePress::Right) => match item {
                 TabBarItem::Tab { .. } => {
+                    self.tab_drag_state = None;
                     self.show_tab_navigator();
                 }
                 TabBarItem::NewTabButton { .. } => {
+                    self.tab_drag_state = None;
                     self.do_new_tab_button_click(MousePress::Right);
                 }
                 TabBarItem::None
@@ -563,8 +929,9 @@ impl super::TermWindow {
             },
             WMEK::VertWheel(n) => {
                 if self.config.mouse_wheel_scrolls_tabs {
-                    self.activate_tab_relative(if n < 1 { 1 } else { -1 }, true)
-                        .ok();
+                    if let Err(err) = self.activate_tab_relative(if n < 1 { 1 } else { -1 }, true) {
+                        log::debug!("activate_tab_relative on wheel failed: {err:#}");
+                    }
                 }
             }
             _ => {}
@@ -617,6 +984,10 @@ impl super::TermWindow {
                 ),
                 dims,
             );
+            // Exit peek mode when scrolling to bottom
+            if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+                pane.set_primary_peek(false);
+            }
             context.invalidate();
         }
         context.set_cursor(Some(MouseCursor::Arrow));
@@ -750,10 +1121,16 @@ impl super::TermWindow {
             (resize_zone_pt * self.dimensions.dpi / base_dpi).max(resize_zone_pt) as isize;
         let in_resize_zone = event.coords.x < resize_zone
             || (event.coords.x as usize)
-                >= self.dimensions.pixel_width.saturating_sub(resize_zone as usize)
+                >= self
+                    .dimensions
+                    .pixel_width
+                    .saturating_sub(resize_zone as usize)
             || event.coords.y < resize_zone
             || (event.coords.y as usize)
-                >= self.dimensions.pixel_height.saturating_sub(resize_zone as usize);
+                >= self
+                    .dimensions
+                    .pixel_height
+                    .saturating_sub(resize_zone as usize);
 
         if capture_mouse && !in_resize_zone {
             self.current_mouse_capture = Some(MouseCapture::TerminalPane(pane.pane_id()));
@@ -867,7 +1244,11 @@ impl super::TermWindow {
             // When hovering over a hyperlink, show an appropriate
             // mouse cursor to give the cue that it is clickable
             MouseCursor::Hand
-        } else if pane.is_mouse_grabbed() || outside_window || in_resize_zone || self.edge_drag_in_progress {
+        } else if pane.is_mouse_grabbed()
+            || outside_window
+            || in_resize_zone
+            || self.edge_drag_in_progress
+        {
             MouseCursor::Arrow
         } else {
             MouseCursor::Text
@@ -944,7 +1325,43 @@ impl super::TermWindow {
             }),
         };
 
-        if allow_action && !self.edge_drag_in_progress {
+        // Some less setups run without alt screen. In that mode, the default
+        // wheel binding scrolls terminal scrollback instead of less content.
+        // Detect less and map wheel to arrow keys directly.
+        let is_wheel_event = matches!(event.kind, WMEK::VertWheel(_) | WMEK::HorzWheel(_));
+        let foreground_process = if is_wheel_event {
+            pane.get_foreground_process_name(CachePolicy::AllowStale)
+        } else {
+            None
+        };
+        let foreground_bin = foreground_process
+            .as_deref()
+            .and_then(|name| name.rsplit('/').next());
+        let less_without_alt = is_wheel_event
+            && !pane.is_alt_screen_active()
+            && !pane.is_mouse_grabbed()
+            && foreground_bin == Some("less");
+        let bypass_wheel_assignment_in_alt =
+            is_wheel_event && pane.is_alt_screen_active() && !pane.is_mouse_grabbed();
+        if less_without_alt {
+            let (key, amount) = match event.kind {
+                WMEK::VertWheel(amount) if amount > 0 => (KeyCode::UpArrow, amount as usize),
+                WMEK::VertWheel(amount) if amount < 0 => (KeyCode::DownArrow, (-amount) as usize),
+                WMEK::HorzWheel(amount) if amount > 0 => (KeyCode::LeftArrow, amount as usize),
+                WMEK::HorzWheel(amount) if amount < 0 => (KeyCode::RightArrow, (-amount) as usize),
+                _ => (KeyCode::DownArrow, 0),
+            };
+            for _ in 0..amount {
+                if let Err(err) = pane.key_down(key.clone(), KeyModifiers::default()) {
+                    log::debug!("forwarding wheel as key to less failed: {err:#}");
+                    break;
+                }
+            }
+            context.invalidate();
+            return;
+        }
+
+        if allow_action && !self.edge_drag_in_progress && !bypass_wheel_assignment_in_alt {
             if let Some(mut event_trigger_type) = event_trigger_type {
                 self.current_event = Some(event_trigger_type.to_dynamic());
                 let mut modifiers = event.modifiers;
@@ -1001,10 +1418,11 @@ impl super::TermWindow {
                     _ => {}
                 };
 
+                let alt_screen = pane.is_alt_screen_active();
                 let mouse_mods = config::MouseEventTriggerMods {
                     mods: modifiers,
                     mouse_reporting,
-                    alt_screen: if pane.is_alt_screen_active() {
+                    alt_screen: if alt_screen {
                         MouseEventAltScreen::True
                     } else {
                         MouseEventAltScreen::False
@@ -1012,7 +1430,9 @@ impl super::TermWindow {
                 };
 
                 if let Some(action) = self.input_map.lookup_mouse(event_trigger_type, mouse_mods) {
-                    self.perform_key_assignment(&pane, &action).ok();
+                    if let Err(err) = self.perform_key_assignment(&pane, &action) {
+                        log::debug!("mouse assignment failed: {err:#}");
+                    }
                     return;
                 }
             }
@@ -1063,7 +1483,9 @@ impl super::TermWindow {
             && !self.edge_drag_in_progress
             && !(self.config.swallow_mouse_click_on_pane_focus && is_click_to_focus_pane)
         {
-            pane.mouse_event(mouse_event).ok();
+            if let Err(err) = pane.mouse_event(mouse_event) {
+                log::debug!("forwarding mouse event to pane failed: {err:#}");
+            }
         }
 
         match event.kind {
@@ -1080,5 +1502,41 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
         MousePress::Left => TMB::Left,
         MousePress::Right => TMB::Right,
         MousePress::Middle => TMB::Middle,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mouse_dispatch_target, MouseDispatchTarget};
+    use crate::termwindow::MouseCapture;
+    use mux::pane::PaneId;
+
+    #[test]
+    fn terminal_capture_keeps_release_routed_to_terminal() {
+        assert_eq!(
+            mouse_dispatch_target(
+                true,
+                0,
+                24,
+                Some(&MouseCapture::TerminalPane(PaneId::new(1))),
+            ),
+            MouseDispatchTarget::Terminal
+        );
+    }
+
+    #[test]
+    fn ui_item_wins_when_terminal_is_not_captured() {
+        assert_eq!(
+            mouse_dispatch_target(true, 0, 24, Some(&MouseCapture::UI)),
+            MouseDispatchTarget::Ui
+        );
+    }
+
+    #[test]
+    fn title_area_wins_without_ui_or_terminal_capture() {
+        assert_eq!(
+            mouse_dispatch_target(false, 0, 24, None),
+            MouseDispatchTarget::TitleArea
+        );
     }
 }

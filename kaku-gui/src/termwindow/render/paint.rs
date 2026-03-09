@@ -1,10 +1,20 @@
-use crate::termwindow::{RenderFrame, TermWindowNotif};
+use crate::customglyph::{BlockAlpha, BlockCoord, Poly, PolyCommand, PolyStyle};
+use crate::termwindow::box_model::*;
+use crate::termwindow::render::corners::{
+    BOTTOM_LEFT_ROUNDED_CORNER, BOTTOM_RIGHT_ROUNDED_CORNER, TOP_LEFT_ROUNDED_CORNER,
+    TOP_RIGHT_ROUNDED_CORNER,
+};
+use crate::termwindow::{DimensionContext, RenderFrame, TermWindowNotif};
+use crate::utilsprites::RenderMetrics;
 use ::window::bitmaps::atlas::OutOfTextureSpace;
 use ::window::WindowOps;
 use anyhow::Context;
+use config::Dimension;
 use smol::Timer;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use wezterm_font::ClearShapeCache;
+use window::color::LinearRgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowImage {
@@ -12,6 +22,8 @@ pub enum AllowImage {
     Scale(usize),
     No,
 }
+
+const STATUS_DOT_SIZE: f32 = 12.0;
 
 impl crate::TermWindow {
     pub fn paint_impl(&mut self, frame: &mut RenderFrame) -> anyhow::Result<()> {
@@ -103,6 +115,7 @@ impl crate::TermWindow {
                 }
             }
         }
+
         log::debug!("paint_impl before call_draw elapsed={:?}", start.elapsed());
 
         self.call_draw(frame)?;
@@ -133,6 +146,9 @@ impl crate::TermWindow {
                             let win = window.clone();
                             window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
                                 tw.scheduled_animation.borrow_mut().take();
+                                // Modal content is cached, so blinking carets and other
+                                // time-based modal elements must be explicitly reconfigured.
+                                tw.invalidate_modal();
                                 win.invalidate();
                             })));
                         })
@@ -213,9 +229,113 @@ impl crate::TermWindow {
                 }
             }
             _ if window_is_transparent => {
-                // Avoid doubling up the background color: the panes
-                // will render out through the padding so there
-                // should be no gaps that need filling in
+                // Avoid doubling up the background color for the main pane area.
+                // We still need to paint strips that are intentionally excluded
+                // from pane background quads.
+                let strip_background = if panes.len() == 1 {
+                    panes[0].pane.palette().background
+                } else {
+                    self.palette().background
+                }
+                .to_linear()
+                .mul_alpha(self.config.window_background_opacity);
+                let border = self.get_os_border();
+                let tab_bar_height = if self.show_tab_bar {
+                    self.tab_bar_pixel_height()
+                        .context("tab_bar_pixel_height")?
+                } else {
+                    0.0
+                };
+                let (_, padding_bottom) = self.effective_vertical_padding();
+                let padding_bottom = padding_bottom as f32;
+                let top_fill_height = border.top.get() as f32
+                    + if self.config.tab_bar_at_bottom {
+                        0.0
+                    } else {
+                        tab_bar_height
+                    };
+                let bottom_fill_height = padding_bottom
+                    + border.bottom.get() as f32
+                    + if self.config.tab_bar_at_bottom {
+                        tab_bar_height
+                    } else {
+                        0.0
+                    };
+                let right_fill_width =
+                    self.effective_right_padding(&self.config) as f32 + border.right.get() as f32;
+                let left_fill_width =
+                    self.config
+                        .window_padding
+                        .left
+                        .evaluate_as_pixels(DimensionContext {
+                            dpi: self.dimensions.dpi as f32,
+                            pixel_max: self.terminal_size.pixel_width as f32,
+                            pixel_cell: self.render_metrics.cell_size.width as f32,
+                        })
+                        + border.left.get() as f32;
+                let window_width = self.dimensions.pixel_width as f32;
+                let window_height = self.dimensions.pixel_height as f32;
+
+                if top_fill_height > 0.0 {
+                    self.filled_rectangle(
+                        &mut layers,
+                        0,
+                        euclid::rect(0.0, 0.0, window_width, top_fill_height.min(window_height)),
+                        strip_background,
+                    )
+                    .context("filled_rectangle for transparent top strip")?;
+                }
+
+                if bottom_fill_height > 0.0 {
+                    let clamped_height = bottom_fill_height.min(window_height);
+                    self.filled_rectangle(
+                        &mut layers,
+                        0,
+                        euclid::rect(
+                            0.0,
+                            (window_height - clamped_height).max(0.0),
+                            window_width,
+                            clamped_height,
+                        ),
+                        strip_background,
+                    )
+                    .context("filled_rectangle for transparent bottom strip")?;
+                }
+
+                if right_fill_width > 0.0 {
+                    let clamped_width = right_fill_width.min(window_width);
+                    let right_fill_y = top_fill_height.min(window_height);
+                    let right_fill_height =
+                        (window_height - right_fill_y - bottom_fill_height.min(window_height))
+                            .max(0.0);
+                    self.filled_rectangle(
+                        &mut layers,
+                        0,
+                        euclid::rect(
+                            window_width - clamped_width,
+                            right_fill_y,
+                            clamped_width,
+                            right_fill_height,
+                        ),
+                        strip_background,
+                    )
+                    .context("filled_rectangle for transparent right strip")?;
+                }
+
+                if left_fill_width > 0.0 {
+                    let clamped_width = left_fill_width.min(window_width);
+                    let left_fill_y = top_fill_height.min(window_height);
+                    let left_fill_height =
+                        (window_height - left_fill_y - bottom_fill_height.min(window_height))
+                            .max(0.0);
+                    self.filled_rectangle(
+                        &mut layers,
+                        0,
+                        euclid::rect(0.0, left_fill_y, clamped_width, left_fill_height),
+                        strip_background,
+                    )
+                    .context("filled_rectangle for transparent left strip")?;
+                }
             }
             _ => {
                 paint_terminal_background = true;
@@ -248,33 +368,392 @@ impl crate::TermWindow {
             .context("filled_rectangle for window background")?;
         }
 
+        let hide_transition_content = self
+            .window
+            .as_ref()
+            .map(|window| window.is_zoom_animation_active())
+            .unwrap_or(false);
+        if hide_transition_content {
+            // During fullscreen transition, keep only a stable background to avoid
+            // one-frame text scale pops.
+            let hide_background = self.palette().background.to_linear();
+            self.filled_rectangle(
+                &mut layers,
+                0,
+                euclid::rect(
+                    0.,
+                    0.,
+                    self.dimensions.pixel_width as f32,
+                    self.dimensions.pixel_height as f32,
+                ),
+                hide_background,
+            )
+            .context("filled_rectangle for fullscreen transition hide")?;
+            drop(layers);
+            return Ok(());
+        }
+
+        let num_panes = panes.len();
+        let mut active_pane_top_right: Option<(f32, f32, bool)> = None;
+
         for pos in panes {
+            if pos.is_active && num_panes > 1 {
+                let cell_width = self.render_metrics.cell_size.width as f32;
+                let cell_height = self.render_metrics.cell_size.height as f32;
+                let (_, padding_top) = self.padding_left_top();
+                let border = self.get_os_border();
+                let tab_bar_height = if self.show_tab_bar {
+                    self.tab_bar_pixel_height().unwrap_or(0.)
+                } else {
+                    0.
+                };
+                let top_bar_height = if self.config.tab_bar_at_bottom {
+                    0.0
+                } else {
+                    tab_bar_height
+                };
+                let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32;
+
+                let x = self.content_left_inset() + ((pos.left + pos.width) as f32 * cell_width);
+                let y = top_pixel_y + (pos.top as f32 * cell_height);
+                let is_top_pane = pos.top == 0;
+                active_pane_top_right = Some((x, y, is_top_pane));
+            }
             if pos.is_active {
-                self.update_text_cursor(&pos);
+                if self.get_modal().is_none() {
+                    self.update_text_cursor(&pos);
+                }
                 if focused {
                     pos.pane.advise_focus();
                     mux::Mux::get().record_focus_for_current_identity(pos.pane.pane_id());
                 }
+                // Bell state cleared in clear_active_tab_bell_state() to ensure badge sync
             }
             self.paint_pane(&pos, &mut layers).context("paint_pane")?;
+        }
+
+        static CIRCLE_POLY: &[Poly] = &[Poly {
+            path: &[PolyCommand::Circle {
+                center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+                radius: BlockCoord::Frac(1, 2),
+            }],
+            intensity: BlockAlpha::Full,
+            style: PolyStyle::Fill,
+        }];
+
+        const RIGHT_INSET: f32 = 3.0;
+        const TOP_PANE_MARGIN_WITH_TAB_BAR: f32 = 24.0;
+        const TOP_PANE_MARGIN_NO_TAB_BAR: f32 = 14.0;
+        const LOWER_PANE_MARGIN: f32 = 20.0;
+
+        // Draw dot indicator for the active pane when split
+        if let Some((dot_x, dot_y, is_top_pane)) = active_pane_top_right {
+            let top_pane_margin = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
+                TOP_PANE_MARGIN_WITH_TAB_BAR
+            } else {
+                TOP_PANE_MARGIN_NO_TAB_BAR
+            };
+            let margin_top = if is_top_pane {
+                top_pane_margin
+            } else {
+                LOWER_PANE_MARGIN
+            };
+
+            const DOT_ALPHA: f32 = 0.5;
+            let dot_color = self.palette().cursor_bg.to_linear().mul_alpha(DOT_ALPHA);
+
+            self.poly_quad(
+                &mut layers,
+                2,
+                euclid::point2(dot_x - STATUS_DOT_SIZE - RIGHT_INSET, dot_y + margin_top),
+                CIRCLE_POLY,
+                1,
+                euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
+                dot_color,
+            )
+            .context("active pane indicator")?;
         }
 
         if let Some(pane) = self.get_active_pane_or_overlay() {
             let splits = self.get_splits();
             for split in &splits {
-                self.paint_split(&mut layers, split, &pane)
+                self.paint_split(&mut layers, split, &splits, &pane)
                     .context("paint_split")?;
             }
         }
 
+        // Clear bell state for active tab and update Dock badge (always, regardless of tab bar visibility)
+        self.clear_active_tab_bell_state();
+
+        // Draw visual notification dot on inactive tabs with unread bell
         if self.show_tab_bar {
             self.paint_tab_bar(&mut layers).context("paint_tab_bar")?;
+            self.paint_tab_bell_indicators(&mut layers)?;
         }
 
         self.paint_window_borders(&mut layers)
             .context("paint_window_borders")?;
         drop(layers);
         self.paint_modal().context("paint_modal")?;
+        self.paint_toast().context("paint_toast")?;
+
+        Ok(())
+    }
+
+    /// Clear bell state for all panes in the active tab and update global Dock badge.
+    /// Called every paint cycle to ensure badge stays in sync regardless of tab bar visibility.
+    /// Only clears when window has focus, so Dock badge persists while window is unfocused.
+    fn clear_active_tab_bell_state(&mut self) {
+        if self.focused.is_none() {
+            return;
+        }
+        // Fast path: skip mux lock if no panes have unread bells
+        if !self.pane_state.borrow().values().any(|s| s.has_unread_bell) {
+            return;
+        }
+        let mux = mux::Mux::get();
+        let mux_window = match mux.get_window(self.mux_window_id) {
+            Some(w) => w,
+            None => return,
+        };
+        let active_tab_idx = mux_window.get_active_idx();
+
+        if let Some(active_tab) = mux_window.get_by_idx(active_tab_idx) {
+            let active_tab_panes = active_tab.iter_panes_ignoring_zoom();
+            let mut cleared_count: isize = 0;
+            for pos in &active_tab_panes {
+                let mut state = self.pane_state(pos.pane.pane_id());
+                if state.has_unread_bell {
+                    state.has_unread_bell = false;
+                    cleared_count += 1;
+                }
+            }
+            if cleared_count > 0 {
+                crate::frontend::front_end().adjust_unread_bell_count(-cleared_count);
+            }
+        }
+    }
+
+    /// Draw a dot on inactive tabs that have panes with unread bell events.
+    fn paint_tab_bell_indicators(
+        &mut self,
+        layers: &mut crate::quad::TripleLayerQuadAllocator,
+    ) -> anyhow::Result<()> {
+        use crate::tabbar::TabBarItem;
+
+        // Fast path: skip mux lock entirely if no panes have unread bells
+        if !self.config.bell_tab_indicator
+            || !self.pane_state.borrow().values().any(|s| s.has_unread_bell)
+        {
+            return Ok(());
+        }
+
+        // Figure out which tab indices have unread bell panes
+        let mux = mux::Mux::get();
+        let mux_window = match mux.get_window(self.mux_window_id) {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+        let active_tab_idx = mux_window.get_active_idx();
+
+        let mut tabs_with_bell: HashSet<usize> = HashSet::new();
+        for (idx, tab) in mux_window.iter().enumerate() {
+            if idx == active_tab_idx {
+                continue; // skip active tab
+            }
+            let panes = tab.iter_panes_ignoring_zoom();
+            for pos in &panes {
+                if self.pane_state(pos.pane.pane_id()).has_unread_bell {
+                    tabs_with_bell.insert(idx);
+                    break;
+                }
+            }
+        }
+
+        if tabs_with_bell.is_empty() {
+            return Ok(());
+        }
+
+        let notif_color = self.palette().cursor_bg.to_linear().mul_alpha(0.9);
+
+        static CIRCLE_POLY: &[Poly] = &[Poly {
+            path: &[PolyCommand::Circle {
+                center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+                radius: BlockCoord::Frac(1, 2),
+            }],
+            intensity: BlockAlpha::Full,
+            style: PolyStyle::Fill,
+        }];
+
+        const DOT_RIGHT_MARGIN: f32 = 3.0;
+
+        for ui_item in &self.ui_items {
+            if let crate::termwindow::UIItemType::TabBar(TabBarItem::Tab {
+                tab_idx,
+                active: false,
+            }) = &ui_item.item_type
+            {
+                if tabs_with_bell.contains(tab_idx) {
+                    // Draw dot at the right side of the tab, vertically centered
+                    let dot_x =
+                        (ui_item.x + ui_item.width) as f32 - STATUS_DOT_SIZE - DOT_RIGHT_MARGIN;
+                    let dot_y = ui_item.y as f32
+                        + ((ui_item.height as f32 - STATUS_DOT_SIZE) / 2.0).round();
+
+                    self.poly_quad(
+                        layers,
+                        2,
+                        euclid::point2(dot_x, dot_y),
+                        CIRCLE_POLY,
+                        1,
+                        euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
+                        notif_color,
+                    )
+                    .context("tab bell indicator")?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Render the toast notification
+    pub fn paint_toast(&mut self) -> anyhow::Result<()> {
+        let (toast_at, message, lifetime) = match &self.toast {
+            Some((t, msg, lifetime)) if t.elapsed() < *lifetime => (*t, msg.clone(), *lifetime),
+            _ => return Ok(()),
+        };
+
+        let font = self.fonts.title_font()?;
+        let metrics = RenderMetrics::with_font_metrics(&font.metrics());
+
+        // Fade out during the last 500ms of the configured lifetime.
+        let elapsed_ms = toast_at.elapsed().as_millis() as f32;
+        let lifetime_ms = lifetime.as_millis() as f32;
+        let fade_start_ms = (lifetime_ms - 500.0).max(0.0);
+        let alpha = if elapsed_ms > fade_start_ms {
+            (1.0 - (elapsed_ms - fade_start_ms) / 500.0).max(0.0)
+        } else {
+            1.0
+        };
+
+        // Use theme-appropriate toast colors:
+        // Light theme: yellow/gold background with dark text
+        // Dark theme: purple background with white text
+        let palette = self.palette();
+        let is_light = crate::termwindow::is_light_color(&palette.background);
+        let (bg_color, text_color) = if is_light {
+            // Light theme: use yellow/gold (ANSI 3) with dark text
+            let bg_linear = palette.colors.0[3].to_linear();
+            (
+                LinearRgba(bg_linear.0, bg_linear.1, bg_linear.2, 0.9 * alpha),
+                LinearRgba(0.1, 0.1, 0.1, alpha),
+            )
+        } else {
+            // Dark theme: use purple (ANSI 13) with white text
+            let bg_linear = palette.colors.0[13].to_linear();
+            (
+                LinearRgba(bg_linear.0, bg_linear.1, bg_linear.2, 0.9 * alpha),
+                LinearRgba(1.0, 1.0, 1.0, alpha),
+            )
+        };
+        let toast_radius = Dimension::Pixels(8.0);
+
+        let text = Element::new(&font, ElementContent::Text(message.clone()))
+            .colors(ElementColors {
+                border: BorderColor::default(),
+                bg: LinearRgba::TRANSPARENT.into(),
+                text: text_color.into(),
+            })
+            .display(DisplayType::Block);
+
+        let element = Element::new(&font, ElementContent::Children(vec![text]))
+            .colors(ElementColors {
+                // Rounded corner polys use border colors even if the border
+                // width is zero; match bg to avoid corner gaps.
+                border: BorderColor::new(bg_color.into()),
+                bg: bg_color.into(),
+                text: text_color.into(),
+            })
+            .padding(BoxDimension {
+                left: Dimension::Cells(0.75),
+                right: Dimension::Cells(0.75),
+                top: Dimension::Cells(0.25),
+                bottom: Dimension::Cells(0.25),
+            })
+            .border(BoxDimension::new(Dimension::Pixels(0.0)))
+            .border_corners(Some(Corners {
+                top_left: SizedPoly {
+                    width: toast_radius,
+                    height: toast_radius,
+                    poly: TOP_LEFT_ROUNDED_CORNER,
+                },
+                top_right: SizedPoly {
+                    width: toast_radius,
+                    height: toast_radius,
+                    poly: TOP_RIGHT_ROUNDED_CORNER,
+                },
+                bottom_left: SizedPoly {
+                    width: toast_radius,
+                    height: toast_radius,
+                    poly: BOTTOM_LEFT_ROUNDED_CORNER,
+                },
+                bottom_right: SizedPoly {
+                    width: toast_radius,
+                    height: toast_radius,
+                    poly: BOTTOM_RIGHT_ROUNDED_CORNER,
+                },
+            }));
+
+        let dimensions = self.dimensions;
+        let border = self.get_os_border();
+        // Calculate width based on message length (each char ~cell_width + padding)
+        let approx_width = (message.len() as f32 + 1.5) * metrics.cell_size.width as f32;
+        let toast_height = metrics.cell_size.height as f32 * 1.5;
+        // Use consistent margin based on cell size
+        let h_margin = metrics.cell_size.width as f32 * 2.0;
+        let v_margin = metrics.cell_size.height as f32 * 2.0;
+
+        // Position at bottom-right with fixed margin from window edge
+        let right_x =
+            dimensions.pixel_width as f32 - approx_width - h_margin - border.right.get() as f32;
+        let bottom_y =
+            dimensions.pixel_height as f32 - toast_height - v_margin - border.bottom.get() as f32;
+
+        let computed = self.compute_element(
+            &LayoutContext {
+                height: DimensionContext {
+                    dpi: dimensions.dpi as f32,
+                    pixel_max: dimensions.pixel_height as f32,
+                    pixel_cell: metrics.cell_size.height as f32,
+                },
+                width: DimensionContext {
+                    dpi: dimensions.dpi as f32,
+                    pixel_max: dimensions.pixel_width as f32,
+                    pixel_cell: metrics.cell_size.width as f32,
+                },
+                bounds: euclid::rect(right_x, bottom_y, approx_width, toast_height),
+                metrics: &metrics,
+                gl_state: self.render_state.as_ref().unwrap(),
+                zindex: 120,
+            },
+            &element,
+        )?;
+
+        let gl_state = self.render_state.as_ref().unwrap();
+        self.render_element(&computed, gl_state, None)?;
+
+        // Keep redrawing during fade-out
+        if elapsed_ms > fade_start_ms {
+            let next = Instant::now() + Duration::from_millis(16);
+            let mut anim = self.has_animation.borrow_mut();
+            match *anim {
+                Some(existing) if existing <= next => {}
+                _ => {
+                    *anim = Some(next);
+                }
+            }
+        }
 
         Ok(())
     }

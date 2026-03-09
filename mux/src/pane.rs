@@ -2,13 +2,15 @@ use crate::domain::DomainId;
 use crate::renderable::*;
 use crate::ExitBehavior;
 use async_trait::async_trait;
-use config::keyassignment::{KeyAssignment, ScrollbackEraseMode};
+use config::keyassignment::{KeyAssignment, PaneEncoding, ScrollbackEraseMode};
 use downcast_rs::{impl_downcast, Downcast};
 use parking_lot::MappedMutexGuard;
 use rangeset::RangeSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use termwiz::hyperlink::Rule;
 use termwiz::input::KeyboardEncoding;
@@ -22,10 +24,71 @@ use wezterm_term::{
 };
 
 static PANE_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
-pub type PaneId = usize;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PaneId(usize);
+
+impl PaneId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for PaneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for PaneId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<usize>().map(PaneId)
+    }
+}
+
+impl From<usize> for PaneId {
+    fn from(v: usize) -> Self {
+        Self(v)
+    }
+}
+impl From<PaneId> for usize {
+    fn from(v: PaneId) -> usize {
+        v.0
+    }
+}
+impl From<PaneId> for u64 {
+    fn from(v: PaneId) -> u64 {
+        v.0 as u64
+    }
+}
+impl std::convert::TryFrom<u64> for PaneId {
+    type Error = <usize as std::convert::TryFrom<u64>>::Error;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(PaneId)
+    }
+}
+impl std::convert::TryFrom<i64> for PaneId {
+    type Error = <usize as std::convert::TryFrom<i64>>::Error;
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        usize::try_from(v).map(PaneId)
+    }
+}
 
 pub fn alloc_pane_id() -> PaneId {
-    PANE_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
+    PaneId(PANE_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Holds a pane's reader along with the optional raw file descriptor
+/// for polling on Unix platforms.
+pub struct PaneReader {
+    pub reader: Box<dyn std::io::Read + Send>,
+    #[cfg(unix)]
+    pub fd: Option<RawFd>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,9 +299,16 @@ pub trait Pane: Downcast + Send + Sync {
         Progress::None
     }
     fn send_paste(&self, text: &str) -> anyhow::Result<()>;
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>>;
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>>;
     fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write>;
     fn resize(&self, size: TerminalSize) -> anyhow::Result<()>;
+    /// Resize terminal state only without notifying the PTY.
+    /// Used during live split-drag to provide smooth visual feedback
+    /// without sending rapid SIGWINCH to the shell.
+    /// The default implementation falls back to `resize`.
+    fn resize_visual(&self, size: TerminalSize) -> anyhow::Result<()> {
+        self.resize(size)
+    }
     /// Called as a hint that the pane is being resized as part of
     /// a zoom-to-fill-all-the-tab-space operation.
     fn set_zoomed(&self, _zoomed: bool) {}
@@ -257,6 +327,12 @@ pub trait Pane: Downcast + Send + Sync {
     fn get_keyboard_encoding(&self) -> KeyboardEncoding {
         KeyboardEncoding::Xterm
     }
+
+    fn get_encoding(&self) -> PaneEncoding {
+        PaneEncoding::Utf8
+    }
+
+    fn set_encoding(&self, _encoding: PaneEncoding) {}
 
     fn copy_user_vars(&self) -> HashMap<String, String> {
         HashMap::new()
@@ -310,6 +386,12 @@ pub trait Pane: Downcast + Send + Sync {
     /// handling of clicks.
     fn is_mouse_grabbed(&self) -> bool;
     fn is_alt_screen_active(&self) -> bool;
+
+    /// Primary Screen Peek: view primary screen history while in alt screen
+    fn is_primary_peek(&self) -> bool {
+        false
+    }
+    fn set_primary_peek(&self, _peek: bool) {}
 
     fn set_clipboard(&self, _clipboard: &Arc<dyn Clipboard>) {}
     fn set_download_handler(&self, _handler: &Arc<dyn DownloadHandler>) {}
@@ -624,7 +706,7 @@ mod test {
         fn send_paste(&self, _: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
+        fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
             Ok(None)
         }
         fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {

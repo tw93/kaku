@@ -4,16 +4,27 @@
 
 set -euo pipefail
 
+CONFIG_DIR="$HOME/.config/kaku"
+STATE_FILE="$CONFIG_DIR/state.json"
+LEGACY_VERSION_FILE="$CONFIG_DIR/.kaku_config_version"
+LEGACY_GEOMETRY_FILE="$CONFIG_DIR/.kaku_window_geometry"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SCRIPT="$SCRIPT_DIR/state_common.sh"
+
+if [[ ! -f "$COMMON_SCRIPT" ]]; then
+	echo "Error: missing shared state script: $COMMON_SCRIPT"
+	exit 1
+fi
+# shellcheck source=state_common.sh
+source "$COMMON_SCRIPT"
+
+CURRENT_CONFIG_VERSION="$(read_bundled_config_version "$SCRIPT_DIR")"
+
 # Always persist config version at script exit to avoid repeated onboarding loops
 # when optional setup steps fail on user machines.
-persist_config_version() {
-	mkdir -p "$HOME/.config/kaku"
-	echo "5" >"$HOME/.config/kaku/.kaku_config_version"
-}
 trap persist_config_version EXIT
 
 # Resources directory resolution
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$SCRIPT_DIR/setup_zsh.sh" ]]; then
 	RESOURCES_DIR="$SCRIPT_DIR"
 elif [[ -f "/Applications/Kaku.app/Contents/Resources/setup_zsh.sh" ]]; then
@@ -26,6 +37,30 @@ else
 fi
 
 SETUP_SCRIPT="$RESOURCES_DIR/setup_zsh.sh"
+TOOLS_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
+
+resolve_kaku_cli() {
+	local candidates=(
+		"$RESOURCES_DIR/../MacOS/kaku"
+		"/Applications/Kaku.app/Contents/MacOS/kaku"
+		"$HOME/Applications/Kaku.app/Contents/MacOS/kaku"
+	)
+
+	local candidate
+	for candidate in "${candidates[@]}"; do
+		if [[ -x "$candidate" ]]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	if command -v kaku >/dev/null 2>&1; then
+		command -v kaku
+		return 0
+	fi
+
+	return 1
+}
 
 # Clear screen
 clear
@@ -40,19 +75,27 @@ echo " | . \ (_| ||   < | |_| |"
 echo " |_|\_\__,_||_|\_\ \__,_|"
 echo -e "\033[0m"
 echo "Welcome to Kaku!"
-echo "The terminal built for the AI coding era."
+echo "A fast, out-of-the-box terminal built for AI coding."
 echo "--------------------------------------------------------"
 echo "Would you like to install Kaku's enhanced shell features?"
 echo "This includes:"
-echo "  - Starship Prompt"
 echo "  - z - Smart Directory Jumper"
+echo "  - zsh-completions - Rich Tab Completions"
 echo "  - Zsh Syntax Highlighting"
 echo "  - Zsh Autosuggestions"
+echo "  - Kaku Theme"
+echo "  - Optional CLI tools via Homebrew: Starship, Delta, Lazygit, Yazi"
+echo "  - If Homebrew is missing, Kaku can offer to install it"
+echo ""
+echo "Shell config model:"
+echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
+echo "  - .zshrc only gets one source line"
+echo "  - You can roll back anytime with: kaku reset"
 echo "--------------------------------------------------------"
 echo ""
 
 # Interactive Prompt
-read -p "Install enhanced shell features? [Y/n] " -n 1 -r
+read -p "Set up Kaku now? Press Enter to continue, type n to skip: " -n 1 -r
 echo ""
 
 INSTALL_SHELL=false
@@ -60,161 +103,85 @@ if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
 	INSTALL_SHELL=true
 fi
 
-# Kaku Theme Prompt
-echo "--------------------------------------------------------"
-echo "Would you like to use the Kaku Theme?"
-echo "A modern, high-contrast dark theme optimized for AI coding."
-echo "Perfect for Claude, Codex, and late-night hacking."
-echo "--------------------------------------------------------"
-read -p "Apply Kaku Theme? [Y/n] " -n 1 -r
-echo ""
-
-INSTALL_THEME=false
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-	INSTALL_THEME=true
-fi
-
-# Delta (Git Diff Beautifier) Prompt
-echo "--------------------------------------------------------"
-echo "Would you like to install Delta?"
-echo "Beautiful git diffs with syntax highlighting."
-echo "Perfect for code review and AI-assisted development."
-echo "--------------------------------------------------------"
-read -p "Install Delta? [Y/n] " -n 1 -r
-echo ""
-
-INSTALL_DELTA=false
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-	INSTALL_DELTA=true
-fi
+INSTALL_THEME="$INSTALL_SHELL"
 
 # Process Shell Features
 if [[ "$INSTALL_SHELL" == "true" ]]; then
-	if [[ -f "$SETUP_SCRIPT" ]]; then
-		if ! "$SETUP_SCRIPT"; then
+	if kaku_bin="$(resolve_kaku_cli)"; then
+		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 "$kaku_bin" init; then
 			echo ""
 			echo "Warning: shell setup failed. You can retry manually:"
-			echo "  bash \"$SETUP_SCRIPT\""
+			echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 \"$kaku_bin\" init"
+			if [[ -f "$SETUP_SCRIPT" ]]; then
+				echo "Fallback:"
+				echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 bash \"$SETUP_SCRIPT\""
+			fi
+		fi
+	elif [[ -f "$SETUP_SCRIPT" ]]; then
+		echo ""
+		echo "Warning: Kaku CLI not found during first-run setup. Falling back to setup_zsh.sh."
+		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT"; then
+			echo ""
+			echo "Warning: shell setup failed. You can retry manually:"
+			echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 bash \"$SETUP_SCRIPT\""
 		fi
 	else
-		echo "Error: setup_zsh.sh not found at $SETUP_SCRIPT"
+		echo "Error: neither kaku CLI nor setup_zsh.sh was found for shell setup."
 	fi
 else
 	echo ""
 	echo "Skipping shell setup. You can run it manually later:"
-	echo "$SETUP_SCRIPT"
-fi
-
-mkdir -p "$HOME/.config/kaku"
-VERSION_FILE="$HOME/.config/kaku/.kaku_config_version"
-USER_CONFIG_VERSION=0
-if [[ -f "$VERSION_FILE" ]]; then
-	RAW_VERSION="$(cat "$VERSION_FILE" 2>/dev/null || true)"
-	if [[ "$RAW_VERSION" =~ ^[0-9]+$ ]]; then
-		USER_CONFIG_VERSION="$RAW_VERSION"
+	if kaku_bin="$(resolve_kaku_cli)"; then
+		echo "  \"$kaku_bin\" init"
+	elif [[ -f "$SETUP_SCRIPT" ]]; then
+		echo "  bash \"$SETUP_SCRIPT\""
 	fi
 fi
+
+mkdir -p "$CONFIG_DIR"
+
+ensure_user_config_via_cli() {
+	local kaku_lua_dest="$HOME/.config/kaku/kaku.lua"
+	if [[ -f "$kaku_lua_dest" ]]; then
+		echo "Keeping existing user config: $kaku_lua_dest"
+		return 0
+	fi
+
+	local kaku_bin
+	if ! kaku_bin="$(resolve_kaku_cli)"; then
+		echo "Warning: kaku CLI not found, skipped config initialization."
+		return 0
+	fi
+
+	if "$kaku_bin" config --ensure-only >/dev/null 2>&1; then
+		echo "Created minimal user config: $kaku_lua_dest"
+	else
+		echo "Warning: failed to initialize user config via '$kaku_bin config --ensure-only'."
+	fi
+}
 
 # Process Kaku Theme
 if [[ "$INSTALL_THEME" == "true" ]]; then
-	KAKU_LUA_SRC="$RESOURCES_DIR/kaku.lua"
-	KAKU_LUA_DEST="$HOME/.config/kaku/kaku.lua"
-
-		if [[ -f "$KAKU_LUA_SRC" ]]; then
-			if [[ -f "$KAKU_LUA_DEST" && "$USER_CONFIG_VERSION" -ne 1 ]]; then
-				echo "Detected existing custom kaku.lua, skipping automatic overwrite."
-				echo "To apply theme manually, review: $KAKU_LUA_SRC"
-			else
-				if [[ -f "$KAKU_LUA_DEST" ]]; then
-					BACKUP_FILE="$KAKU_LUA_DEST.kaku-backup-$(date +%s)"
-					cp "$KAKU_LUA_DEST" "$BACKUP_FILE"
-					echo "Detected v1 config, backup created at: $BACKUP_FILE"
-				fi
-
-				echo "Installing Kaku theme..."
-				cp "$KAKU_LUA_SRC" "$KAKU_LUA_DEST"
-
-				# Inject Kaku theme before the return statement
-				# We use a temporary file to construct the new content
-				TMP_FILE=$(mktemp)
-
-				# Read all lines except the last one (return config)
-				sed '$d' "$KAKU_LUA_DEST" >"$TMP_FILE"
-
-				# Append Kaku theme config
-				cat <<EOF >>"$TMP_FILE"
-
--- ===== Kaku Theme =====
-config.colors = {
-  foreground = '#d4d4d4',
-  background = '#1e1e1e',
-  cursor_bg = '#569cd6',
-  cursor_fg = '#1e1e1e',
-  cursor_border = '#569cd6',
-  selection_bg = '#264f78',
-  selection_fg = '#d4d4d4',
-  ansi = {'#000000', '#cd3131', '#0dbc79', '#e5e510', '#2472c8', '#bc3fbc', '#11a8cd', '#e5e5e5'},
-  brights = {'#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#e5e5e5'},
-  tab_bar = {
-    background = '#1e1e1e',
-    active_tab = {
-      bg_color = '#1e1e1e',
-      fg_color = '#569cd6',
-      intensity = 'Bold',
-    },
-    inactive_tab = {
-      bg_color = '#2d2d2d',
-      fg_color = '#858585',
-    },
-    inactive_tab_hover = {
-      bg_color = '#2d2d2d',
-      fg_color = '#d4d4d4',
-    },
-    new_tab = {
-      bg_color = '#1e1e1e',
-      fg_color = '#858585',
-    },
-    new_tab_hover = {
-      bg_color = '#2d2d2d',
-      fg_color = '#d4d4d4',
-    },
-  },
-}
-config.window_frame = {
-  active_titlebar_bg = '#1e1e1e',
-  inactive_titlebar_bg = '#1e1e1e',
-  button_bg = '#1e1e1e',
-  button_fg = '#cccccc',
-}
-
-return config
-EOF
-				mv "$TMP_FILE" "$KAKU_LUA_DEST"
-				echo "Kaku theme applied!"
-			fi
-		else
-			echo "Warning: Could not find kaku.lua source at $KAKU_LUA_SRC"
-		fi
+	ensure_user_config_via_cli
 fi
 
-# Process Delta Installation
-if [[ "$INSTALL_DELTA" == "true" ]]; then
-	DELTA_SCRIPT="$RESOURCES_DIR/install_delta.sh"
-	if [[ -f "$DELTA_SCRIPT" ]]; then
+# Process optional CLI tool installation (single prompt)
+if [[ "$INSTALL_SHELL" == "true" ]]; then
+	if [[ -f "$TOOLS_SCRIPT" ]]; then
 		echo ""
-		if ! bash "$DELTA_SCRIPT"; then
-			echo "Warning: Delta installation failed."
+		if ! KAKU_AUTO_INSTALL_TOOLS=1 bash "$TOOLS_SCRIPT"; then
+			echo "Warning: optional tool installation failed."
 		fi
 	else
-		echo "Warning: install_delta.sh not found at $DELTA_SCRIPT"
+		echo "Warning: install_cli_tools.sh not found at $TOOLS_SCRIPT"
 	fi
 fi
 
-echo -e "\n\033[1;32m❤️ Kaku environment is ready! Enjoy coding.\033[0m"
+echo -e "\n\033[1;32m🎃 Kaku environment is ready! Enjoy coding.\033[0m"
 
-# `exec` replaces the shell process and skips EXIT trap handlers.
 # Persist explicitly here so successful first-run/upgrade paths are recorded.
 persist_config_version
 
-# Replace current process with zsh to enter the shell
-exec /bin/zsh -l
+# Replace current process with the user's login shell
+TARGET_SHELL="$(detect_login_shell)"
+exec "$TARGET_SHELL" -l

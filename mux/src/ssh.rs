@@ -5,6 +5,7 @@ use crate::pane::{alloc_pane_id, Pane, PaneId};
 use crate::Mux;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
+use config::keyassignment::PaneEncoding;
 use config::{Shell, SshBackend, SshDomain};
 use filedescriptor::{poll, pollfd, socketpair, AsRawSocketDescriptor, FileDescriptor, POLLIN};
 use portable_pty::cmdbuilder::CommandBuilder;
@@ -13,6 +14,7 @@ use smol::channel::{bounded, Receiver as AsyncReceiver};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Read, Write};
+use std::sync::atomic::AtomicU8;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -262,6 +264,13 @@ impl RemoteSshDomain {
             .iter_extra_env_as_str()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        // Remote servers won't have the "kaku" terminfo entry, which causes
+        // garbled display over SSH.  Override to xterm-256color so the remote
+        // side can handle cursor movement, line wrapping, etc. correctly.
+        if env.get("TERM").map(|t| t.as_str()) == Some("kaku") {
+            env.insert("TERM".to_string(), "xterm-256color".to_string());
+        }
 
         // FIXME: this isn't useful without a way to talk to the remote mux.
         // One option is to forward the mux via unix domain, another is to
@@ -650,7 +659,7 @@ fn connect_ssh_session(
                 // Our session has been authenticated: we can now
                 // set up the real pty for the pane
                 match smol::block_on(session.request_pty(
-                    &config::configuration().term,
+                    "xterm-256color",
                     crate::terminal_size_to_pty_size(*size.lock().unwrap())?,
                     command_line.as_ref().map(|s| s.as_str()),
                     Some(env),
@@ -701,9 +710,11 @@ fn connect_ssh_session(
 impl Domain for RemoteSshDomain {
     async fn spawn_pane(
         &self,
+        _mux: &Mux,
         size: TerminalSize,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
+        encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         let pane_id = alloc_pane_id();
 
@@ -718,7 +729,7 @@ impl Domain for RemoteSshDomain {
         let StartNewSessionResult { pty, child, writer } = if let Some(session) = session.take() {
             match session
                 .request_pty(
-                    &config::configuration().term,
+                    "xterm-256color",
                     crate::terminal_size_to_pty_size(size)
                         .context("compute pty size from terminal size")?,
                     command_line.as_ref().map(|s| s.as_str()),
@@ -757,7 +768,8 @@ impl Domain for RemoteSshDomain {
         // eg: tmux integration to be tunnelled via the remote
         // session without duplicating a lot of logic over here.
 
-        let writer = WriterWrapper::new(writer);
+        let encoding = Arc::new(AtomicU8::new(encoding.to_u8()));
+        let writer = WriterWrapper::new(writer, Arc::clone(&encoding));
 
         let terminal = wezterm_term::Terminal::new(
             size,
@@ -774,6 +786,7 @@ impl Domain for RemoteSshDomain {
             pty,
             Box::new(writer),
             self.id,
+            encoding,
             "RemoteSshDomain".to_string(),
         ));
         let mux = Mux::get();

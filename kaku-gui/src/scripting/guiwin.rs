@@ -12,7 +12,7 @@ use mux_lua::MuxPane;
 use termwiz_funcs::lines_to_escapes;
 use wezterm_dynamic::{FromDynamic, ToDynamic};
 use wezterm_toast_notification::ToastNotification;
-use window::{Connection, ConnectionOps, DeadKeyStatus, WindowOps, WindowState};
+use window::{Appearance, Connection, ConnectionOps, DeadKeyStatus, WindowOps, WindowState};
 
 #[derive(Clone)]
 pub struct GuiWin {
@@ -94,7 +94,9 @@ impl UserData for GuiWin {
             },
         );
         methods.add_method("get_appearance", |_, _, _: ()| {
-            Ok(Connection::get().unwrap().get_appearance().to_string())
+            Ok(Connection::get()
+                .map(|conn| conn.get_appearance().to_string())
+                .unwrap_or_else(|| Appearance::Light.to_string()))
         });
         methods.add_method("set_right_status", |_, this, status: String| {
             this.window.notify(TermWindowNotif::SetRightStatus(status));
@@ -184,11 +186,10 @@ impl UserData for GuiWin {
         methods.add_async_method("get_config_overrides", |lua, this, _: ()| async move {
             let (tx, rx) = smol::channel::bounded(1);
             this.window.notify(TermWindowNotif::GetConfigOverrides(tx));
-            let overrides = rx
-                .recv()
-                .await
-                .map_err(|e| anyhow::anyhow!("{:#}", e))
-                .map_err(luaerr)?;
+            let overrides = match rx.recv().await {
+                Ok(overrides) => overrides,
+                Err(_) => wezterm_dynamic::Value::default(),
+            };
 
             dynamic_to_lua_value(lua, overrides)
         });

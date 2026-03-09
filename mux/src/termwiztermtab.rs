@@ -6,7 +6,7 @@
 use crate::domain::{alloc_domain_id, Domain, DomainId, DomainState};
 use crate::pane::{
     alloc_pane_id, CachePolicy, CloseReason, ForEachPaneLogicalLine, LogicalLine, Pane, PaneId,
-    WithPaneLines,
+    PaneReader, WithPaneLines,
 };
 use crate::renderable::*;
 use crate::tab::Tab;
@@ -14,7 +14,7 @@ use crate::window::WindowId;
 use crate::Mux;
 use anyhow::bail;
 use async_trait::async_trait;
-use config::keyassignment::ScrollbackEraseMode;
+use config::keyassignment::{PaneEncoding, ScrollbackEraseMode};
 use crossbeam::channel::{unbounded as channel, Receiver, Sender};
 use filedescriptor::{FileDescriptor, Pipe};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
@@ -22,6 +22,8 @@ use portable_pty::*;
 use rangeset::RangeSet;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers, MouseEvent as TermWizMouseEvent};
@@ -50,9 +52,11 @@ impl TermWizTerminalDomain {
 impl Domain for TermWizTerminalDomain {
     async fn spawn_pane(
         &self,
+        _mux: &Mux,
         _size: TerminalSize,
         _command: Option<CommandBuilder>,
         _command_dir: Option<String>,
+        _encoding: PaneEncoding,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         bail!("cannot spawn panes in a TermWizTerminalPane");
     }
@@ -188,8 +192,15 @@ impl Pane for TermWizTerminalPane {
         Ok(())
     }
 
-    fn reader(&self) -> anyhow::Result<Option<Box<dyn std::io::Read + Send>>> {
-        Ok(Some(Box::new(self.render_rx.try_clone()?)))
+    fn reader(&self) -> anyhow::Result<Option<PaneReader>> {
+        let reader = self.render_rx.try_clone()?;
+        #[cfg(unix)]
+        let fd = Some(reader.as_raw_fd());
+        Ok(Some(PaneReader {
+            reader: Box::new(reader),
+            #[cfg(unix)]
+            fd,
+        }))
     }
 
     fn writer(&self) -> MappedMutexGuard<'_, dyn std::io::Write> {
@@ -469,7 +480,7 @@ pub fn allocate(
         grab_mouse: true,
     };
 
-    let domain_id = 0;
+    let domain_id = DomainId::new(0);
     let pane = TermWizTerminalPane::new(domain_id, size, input_tx, render_pipe.read, Some(config));
 
     // Add the tab to the mux so that the output is processed

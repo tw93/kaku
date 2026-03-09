@@ -3,8 +3,17 @@ use config::lua::mlua::{self, Lua};
 use luahelper::impl_lua_conversion_dynamic;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use wezterm_dynamic::{FromDynamic, ToDynamic};
 use window::{Appearance, Connection, ConnectionOps};
+
+static APPEARANCE_QUERIED_BEFORE_GUI_READY: AtomicBool = AtomicBool::new(false);
+
+/// Returns whether the config used `wezterm.gui.get_appearance()` before
+/// the GUI connection was initialized, and clears the flag.
+pub fn take_appearance_queried_before_gui_ready() -> bool {
+    APPEARANCE_QUERIED_BEFORE_GUI_READY.swap(false, Ordering::Relaxed)
+}
 
 fn get_conn() -> mlua::Result<Rc<Connection>> {
     Connection::get().ok_or_else(|| {
@@ -96,6 +105,7 @@ pub fn register(lua: &Lua) -> anyhow::Result<()> {
                 Some(conn) => conn.get_appearance().to_string(),
                 None => {
                     // Gui hasn't started yet, assume light
+                    APPEARANCE_QUERIED_BEFORE_GUI_READY.store(true, Ordering::Relaxed);
                     Appearance::Light.to_string()
                 }
             })
