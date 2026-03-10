@@ -25,6 +25,16 @@ pub enum AllowImage {
 
 const STATUS_DOT_SIZE: f32 = 12.0;
 
+fn pane_frame_segments(bounds: ::window::RectF, thickness: f32) -> [::window::RectF; 4] {
+    let t = thickness.max(1.0).min(bounds.width()).min(bounds.height());
+    [
+        euclid::rect(bounds.min_x(), bounds.min_y(), bounds.width(), t),
+        euclid::rect(bounds.min_x(), bounds.max_y() - t, bounds.width(), t),
+        euclid::rect(bounds.min_x(), bounds.min_y(), t, bounds.height()),
+        euclid::rect(bounds.max_x() - t, bounds.min_y(), t, bounds.height()),
+    ]
+}
+
 fn toast_colors_for_palette(
     palette: &wezterm_term::color::ColorPalette,
     alpha: f32,
@@ -414,6 +424,7 @@ impl crate::TermWindow {
 
         let num_panes = panes.len();
         let mut active_pane_top_right: Option<(f32, f32, bool)> = None;
+        let mut active_pane_bounds: Option<::window::RectF> = None;
 
         for pos in panes {
             if pos.is_active && num_panes > 1 {
@@ -437,6 +448,12 @@ impl crate::TermWindow {
                 let y = top_pixel_y + (pos.top as f32 * cell_height);
                 let is_top_pane = pos.top == 0;
                 active_pane_top_right = Some((x, y, is_top_pane));
+                active_pane_bounds = Some(euclid::rect(
+                    self.content_left_inset() + (pos.left as f32 * cell_width),
+                    y,
+                    pos.width as f32 * cell_width,
+                    pos.height as f32 * cell_height,
+                ));
             }
             if pos.is_active {
                 if self.get_modal().is_none() {
@@ -498,6 +515,21 @@ impl crate::TermWindow {
             for split in &splits {
                 self.paint_split(&mut layers, split, &splits, &pane)
                     .context("paint_split")?;
+            }
+
+            if let Some(bounds) = active_pane_bounds {
+                const ACTIVE_PANE_FRAME_ALPHA: f32 = 0.85;
+                let frame_color = pane
+                    .palette()
+                    .cursor_bg
+                    .to_linear()
+                    .mul_alpha(ACTIVE_PANE_FRAME_ALPHA);
+                let frame_thickness = self.config.split_thickness.max(1.0);
+
+                for segment in pane_frame_segments(bounds, frame_thickness) {
+                    self.filled_rectangle(&mut layers, 2, segment, frame_color)
+                        .context("active pane frame")?;
+                }
             }
         }
 
@@ -768,7 +800,7 @@ impl crate::TermWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::toast_colors_for_palette;
+    use super::{pane_frame_segments, toast_colors_for_palette};
     use wezterm_term::color::{ColorPalette, SrgbaTuple};
     use window::color::LinearRgba;
 
@@ -802,5 +834,27 @@ mod tests {
             LinearRgba(expected_bg.0, expected_bg.1, expected_bg.2, 0.9)
         );
         assert_eq!(text, LinearRgba(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn pane_frame_segments_match_expected_edges() {
+        let bounds = euclid::rect(10.0, 20.0, 100.0, 50.0);
+        let segments = pane_frame_segments(bounds, 2.0);
+
+        assert_eq!(segments[0], euclid::rect(10.0, 20.0, 100.0, 2.0));
+        assert_eq!(segments[1], euclid::rect(10.0, 68.0, 100.0, 2.0));
+        assert_eq!(segments[2], euclid::rect(10.0, 20.0, 2.0, 50.0));
+        assert_eq!(segments[3], euclid::rect(108.0, 20.0, 2.0, 50.0));
+    }
+
+    #[test]
+    fn pane_frame_segments_clamp_thickness_to_bounds() {
+        let bounds = euclid::rect(0.0, 0.0, 3.0, 2.0);
+        let segments = pane_frame_segments(bounds, 8.0);
+
+        assert_eq!(segments[0].height(), 2.0);
+        assert_eq!(segments[1].height(), 2.0);
+        assert_eq!(segments[2].width(), 2.0);
+        assert_eq!(segments[3].width(), 2.0);
     }
 }
