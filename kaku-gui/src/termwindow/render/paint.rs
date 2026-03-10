@@ -24,8 +24,8 @@ pub enum AllowImage {
 }
 
 const STATUS_DOT_SIZE: f32 = 12.0;
-const ACTIVE_GUTTER_WIDTH: f32 = 8.0;
-const ACTIVE_GUTTER_LEFT_PADDING: f32 = 4.0;
+const ACTIVE_GUTTER_WIDTH: f32 = 6.0;
+const ACTIVE_GUTTER_LEFT_PADDING: f32 = 8.0;
 
 fn active_pane_indicator_bounds(
     content_left: f32,
