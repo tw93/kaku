@@ -633,10 +633,7 @@ impl crate::TermWindow {
                         self.poly_quad(
                             &mut layers,
                             2,
-                            euclid::point2(
-                                indicator.min_x(),
-                                indicator.max_y() - cap_diameter,
-                            ),
+                            euclid::point2(indicator.min_x(), indicator.max_y() - cap_diameter),
                             CIRCLE_POLY,
                             1,
                             euclid::size2(cap_diameter, cap_diameter),
@@ -916,8 +913,8 @@ impl crate::TermWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_pane_gutter_radius, active_pane_indicator_bounds, active_pane_left_indicator_segment,
-        toast_colors_for_palette,
+        active_pane_gutter_radius, active_pane_indicator_bounds,
+        active_pane_left_indicator_segment, toast_colors_for_palette,
     };
     use wezterm_term::color::{ColorPalette, SrgbaTuple};
     use window::color::LinearRgba;
@@ -1011,11 +1008,11 @@ mod tests {
         let inner_bounds =
             active_pane_indicator_bounds(content_left, 20.0, cell_width, 20.0, 0, 12, 0, 10, 5);
 
-        let leftmost = active_pane_left_indicator_segment(leftmost_bounds, width, left_padding, 5, 5)
-            .expect("leftmost");
-        let inner =
-            active_pane_left_indicator_segment(inner_bounds, width, left_padding, 5, 5)
-                .expect("inner");
+        let leftmost =
+            active_pane_left_indicator_segment(leftmost_bounds, width, left_padding, 5, 5)
+                .expect("leftmost");
+        let inner = active_pane_left_indicator_segment(inner_bounds, width, left_padding, 5, 5)
+            .expect("inner");
 
         let leftmost_content_start = content_left;
         let inner_content_start = content_left + (12.0 * cell_width);
