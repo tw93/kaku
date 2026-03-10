@@ -1277,7 +1277,8 @@ EOF
 echo -e "  ${GREEN}✓${NC} ${BOLD}Script${NC}      Generated kaku.zsh init script"
 
 # 4. Configure .zshrc
-SOURCE_LINE='[[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration'
+PATH_LINE='[[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH" # Kaku PATH Integration'
+SOURCE_LINE='[[ "${TERM:-}" == "kaku" && -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration'
 
 # Migrate legacy inline block from older versions to the single source-line model.
 cleanup_legacy_inline_block() {
@@ -1354,6 +1355,72 @@ END {
 
 cleanup_legacy_inline_block
 
+normalize_kaku_path_line() {
+	if [[ ! -f "$ZSHRC" ]]; then
+		return
+	fi
+
+	local tmp_file
+	tmp_file="$(mktemp "${TMPDIR:-/tmp}/kaku-zshrc.XXXXXX")"
+
+	# Exit codes: 0 = replaced exactly 1 line, 2 = collapsed duplicates, 3 = no match.
+	if awk -v path_line="$PATH_LINE" '
+BEGIN { replaced = 0; extra = 0 }
+{
+	if ($0 ~ /^[[:space:]]*#/ ) {
+		print
+		next
+	}
+
+	if ($0 ~ /kaku\/zsh\/bin/ && $0 ~ /export[[:space:]]+PATH=/) {
+		if (!replaced) {
+			print path_line
+			replaced = 1
+		} else {
+			extra++
+		}
+		next
+	}
+
+	print
+}
+END {
+	if (replaced && extra > 0) {
+		exit 2
+	} else if (replaced) {
+		exit 0
+	}
+	exit 3
+}
+' "$ZSHRC" >"$tmp_file"; then
+		if ! cmp -s "$ZSHRC" "$tmp_file"; then
+			backup_zshrc_once
+			mv "$tmp_file" "$ZSHRC"
+			echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Updated Kaku PATH line in .zshrc"
+		else
+			rm -f "$tmp_file"
+		fi
+	else
+		local awk_status="$?"
+		if [[ "$awk_status" == "2" ]]; then
+			if ! cmp -s "$ZSHRC" "$tmp_file"; then
+				backup_zshrc_once
+				mv "$tmp_file" "$ZSHRC"
+				echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Removed duplicate Kaku PATH line(s) from .zshrc"
+			else
+				rm -f "$tmp_file"
+			fi
+		else
+			rm -f "$tmp_file"
+			if [[ "$awk_status" != "3" ]]; then
+				echo -e "${YELLOW}Warning: failed to normalize Kaku PATH line in .zshrc; leaving it unchanged.${NC}"
+			fi
+		fi
+	fi
+}
+
+normalize_kaku_path_line
+
 normalize_kaku_source_line() {
 	if [[ ! -f "$ZSHRC" ]]; then
 		return
@@ -1423,6 +1490,18 @@ END {
 
 normalize_kaku_source_line
 
+has_kaku_path_line() {
+	if [[ ! -f "$ZSHRC" ]]; then
+		return 1
+	fi
+
+	if grep -Fqx "$PATH_LINE" "$ZSHRC"; then
+		return 0
+	fi
+
+	grep -Eq '^[[:space:]]*\[\[.*kaku/zsh/bin.*\]\][[:space:]]*&&[[:space:]]*export[[:space:]]+PATH=.*kaku/zsh/bin' "$ZSHRC"
+}
+
 has_kaku_source_line() {
 	if [[ ! -f "$ZSHRC" ]]; then
 		return 1
@@ -1437,15 +1516,22 @@ has_kaku_source_line() {
 	grep -Eq '^[[:space:]]*\[\[.*kaku/zsh/kaku\.zsh.*\]\][[:space:]]*&&[[:space:]]*source[[:space:]].*kaku/zsh/kaku\.zsh([[:space:]]|$)' "$ZSHRC"
 }
 
-# Check if the source line already exists
-if has_kaku_source_line; then
+# Check if the managed lines already exist
+if has_kaku_path_line && has_kaku_source_line; then
 	echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Already linked in .zshrc"
 else
 	# Backup existing .zshrc only if it doesn't have Kaku logic yet
 	backup_zshrc_once
 
-	# Append the single source line
-	echo -e "\n$SOURCE_LINE" >>"$ZSHRC"
+	if [[ -f "$ZSHRC" && -s "$ZSHRC" ]]; then
+		echo "" >>"$ZSHRC"
+	fi
+	if ! has_kaku_path_line; then
+		echo "$PATH_LINE" >>"$ZSHRC"
+	fi
+	if ! has_kaku_source_line; then
+		echo "$SOURCE_LINE" >>"$ZSHRC"
+	fi
 	echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Successfully patched .zshrc"
 fi
 

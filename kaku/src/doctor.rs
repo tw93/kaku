@@ -276,7 +276,7 @@ fn build_environment_group() -> DoctorGroup {
         },
         details: vec![
             "Kaku command wrapper is expected at ~/.config/kaku/zsh/bin/kaku".to_string(),
-            "This PATH entry is normally sourced from ~/.config/kaku/zsh/kaku.zsh".to_string(),
+            "This PATH entry is normally added by a managed PATH line in ~/.zshrc".to_string(),
             "PATH in Doctor reflects the current process environment and can differ between GUI and Terminal launches."
                 .to_string(),
         ],

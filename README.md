@@ -99,7 +99,8 @@ If you already use your own Zsh completion workflow such as `fzf-tab`, Kaku's Sm
 
 ```zsh
 export KAKU_SMART_TAB_DISABLE=1
-[[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"
+[[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"
+[[ "${TERM:-}" == "kaku" && -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"
 ```
 
 You can also remap true-color output from specific apps to keep theme consistency:

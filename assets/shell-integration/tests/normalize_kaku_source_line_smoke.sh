@@ -2,7 +2,43 @@
 
 set -euo pipefail
 
-SOURCE_LINE='[[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration'
+PATH_LINE='[[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH" # Kaku PATH Integration'
+SOURCE_LINE='[[ "${TERM:-}" == "kaku" && -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration'
+
+normalize_kaku_path_line_file() {
+  local input_file="$1"
+  local output_file="$2"
+
+  awk -v path_line="$PATH_LINE" '
+BEGIN { replaced = 0; extra = 0 }
+{
+  if ($0 ~ /^[[:space:]]*#/ ) {
+    print
+    next
+  }
+
+  if ($0 ~ /kaku\/zsh\/bin/ && $0 ~ /export[[:space:]]+PATH=/) {
+    if (!replaced) {
+      print path_line
+      replaced = 1
+    } else {
+      extra++
+    }
+    next
+  }
+
+  print
+}
+END {
+  if (replaced && extra > 0) {
+    exit 2
+  } else if (replaced) {
+    exit 0
+  }
+  exit 3
+}
+' "$input_file" >"$output_file"
+}
 
 normalize_kaku_source_line_file() {
   local input_file="$1"
@@ -60,10 +96,11 @@ assert_file_eq() {
 }
 
 run_normalize() {
-  local input_text="$1"
-  local expected_status="$2"
-  local expected_output="$3"
-  local label="$4"
+  local normalize_fn="$1"
+  local input_text="$2"
+  local expected_status="$3"
+  local expected_output="$4"
+  local label="$5"
 
   local tmp_dir input_file output_file expected_file status
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/kaku-normalize-test.XXXXXX")"
@@ -73,7 +110,7 @@ run_normalize() {
   printf '%s' "$input_text" >"$input_file"
   printf '%s' "$expected_output" >"$expected_file"
 
-  if normalize_kaku_source_line_file "$input_file" "$output_file"; then
+  if "$normalize_fn" "$input_file" "$output_file"; then
     status=0
   else
     status=$?
@@ -84,24 +121,42 @@ run_normalize() {
 }
 
 run_normalize \
+  normalize_kaku_path_line_file \
+  $'export PATH="$HOME/bin:$PATH"\n[[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"\n' \
+  0 \
+  $'export PATH="$HOME/bin:$PATH"\n'"$PATH_LINE"$'\n' \
+  "legacy path line is replaced"
+
+run_normalize \
+  normalize_kaku_path_line_file \
+  $'# [[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"\n'"$PATH_LINE"$'\n'"$PATH_LINE"$'\n' \
+  2 \
+  $'# [[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"\n'"$PATH_LINE"$'\n' \
+  "duplicate path lines collapse"
+
+run_normalize \
+  normalize_kaku_source_line_file \
   $'export PATH="$HOME/bin:$PATH"\n[[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration\n' \
   0 \
   $'export PATH="$HOME/bin:$PATH"\n'"$SOURCE_LINE"$'\n' \
   "legacy line is replaced"
 
 run_normalize \
+  normalize_kaku_source_line_file \
   $'[[ -f "\\/Users/lex/.config/kaku/zsh/kaku.zsh" ]] && source "\\/Users/lex/.config/kaku/zsh/kaku.zsh" # Kaku Shell Integration\n' \
   0 \
   "$SOURCE_LINE"$'\n' \
   "escaped absolute path line is normalized"
 
 run_normalize \
+  normalize_kaku_source_line_file \
   $'# [[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"\n'"$SOURCE_LINE"$'\n'"$SOURCE_LINE"$'\n' \
   2 \
   $'# [[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"\n'"$SOURCE_LINE"$'\n' \
   "comments preserved and duplicate active lines collapsed"
 
 run_normalize \
+  normalize_kaku_source_line_file \
   $'export PATH="$HOME/bin:$PATH"\n# no kaku integration here\n' \
   3 \
   $'export PATH="$HOME/bin:$PATH"\n# no kaku integration here\n' \
