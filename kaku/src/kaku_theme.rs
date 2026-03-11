@@ -1,5 +1,6 @@
 use config::{configuration, ConfigHandle};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use wezterm_term::color::{ColorPalette, SrgbaTuple};
 
 #[derive(Clone, Copy)]
@@ -17,9 +18,15 @@ pub struct ThemePalette {
 #[derive(Clone, Copy)]
 struct CachedTheme {
     palette: ThemePalette,
+    appearance_sensitive: bool,
+    appearance_is_dark: Option<bool>,
 }
 
 static THEME_CACHE: Mutex<Option<(usize, CachedTheme)>> = Mutex::new(None);
+#[cfg(target_os = "macos")]
+static APPEARANCE_CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+#[cfg(target_os = "macos")]
+const APPEARANCE_CACHE_TTL: Duration = Duration::from_secs(1);
 
 fn rgb(hex: &str) -> SrgbaTuple {
     let hex = hex.trim_start_matches('#');
@@ -128,7 +135,23 @@ fn light_palette() -> ThemePalette {
     }
 }
 
-fn builtin_kaku_theme(config: &ConfigHandle) -> Option<ThemePalette> {
+fn cached_theme(palette: ThemePalette) -> CachedTheme {
+    CachedTheme {
+        palette,
+        appearance_sensitive: false,
+        appearance_is_dark: None,
+    }
+}
+
+fn appearance_sensitive_theme(palette: ThemePalette, is_dark: bool) -> CachedTheme {
+    CachedTheme {
+        palette,
+        appearance_sensitive: true,
+        appearance_is_dark: Some(is_dark),
+    }
+}
+
+fn builtin_kaku_theme(config: &ConfigHandle) -> Option<CachedTheme> {
     let dark = dark_palette();
     let light = light_palette();
     let dark_terminal_text = rgb("#EDECEE");
@@ -144,23 +167,24 @@ fn builtin_kaku_theme(config: &ConfigHandle) -> Option<ThemePalette> {
             //       'Kaku Dark'.
             // Disambiguate by checking the raw config file.
             if config_file_has_auto_color_scheme(config) {
-                if is_macos_dark_mode() {
-                    return Some(dark);
+                let is_dark = is_macos_dark_mode();
+                if is_dark {
+                    return Some(appearance_sensitive_theme(dark, true));
                 } else {
-                    return Some(light);
+                    return Some(appearance_sensitive_theme(light, false));
                 }
             }
-            return Some(dark);
+            return Some(cached_theme(dark));
         }
-        Some("Kaku Light") => return Some(light),
+        Some("Kaku Light") => return Some(cached_theme(light)),
         _ => {}
     }
 
     let palette: ColorPalette = config.resolved_palette.clone().into();
     if palette_matches_builtin(&palette, dark.bg, dark_terminal_text, dark.primary) {
-        Some(dark)
+        Some(cached_theme(dark))
     } else if palette_matches_builtin(&palette, light.bg, light_terminal_text, light_cursor) {
-        Some(light)
+        Some(cached_theme(light))
     } else {
         None
     }
@@ -232,10 +256,18 @@ fn config_file_has_auto_color_scheme(_config: &ConfigHandle) -> bool {
 /// Returns true for Dark, false for Light (or when detection is unavailable).
 #[cfg(target_os = "macos")]
 fn is_macos_dark_mode() -> bool {
+    let now = Instant::now();
+    let mut cache = APPEARANCE_CACHE.lock().unwrap();
+    if let Some((checked_at, is_dark)) = *cache {
+        if now.duration_since(checked_at) < APPEARANCE_CACHE_TTL {
+            return is_dark;
+        }
+    }
+
     use std::process::Command;
     // `defaults read -g AppleInterfaceStyle` prints "Dark" in dark mode and
     // exits with a non-zero code (key not found) in light mode.
-    match Command::new("defaults")
+    let is_dark = match Command::new("defaults")
         .args(["read", "-g", "AppleInterfaceStyle"])
         .output()
     {
@@ -244,7 +276,9 @@ fn is_macos_dark_mode() -> bool {
             stdout.trim().eq_ignore_ascii_case("dark")
         }
         Err(_) => false, // if the command fails, fall back to light/false
-    }
+    };
+    *cache = Some((now, is_dark));
+    is_dark
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -252,7 +286,7 @@ fn is_macos_dark_mode() -> bool {
     false
 }
 
-fn palette_from_config(config: &ConfigHandle) -> ThemePalette {
+fn theme_from_config(config: &ConfigHandle) -> CachedTheme {
     if let Some(theme) = builtin_kaku_theme(config) {
         return theme;
     }
@@ -291,7 +325,7 @@ fn palette_from_config(config: &ConfigHandle) -> ThemePalette {
         ],
     );
     let muted = pick_muted(bg, text, palette.colors.0[8]);
-    ThemePalette {
+    cached_theme(ThemePalette {
         primary,
         secondary,
         accent,
@@ -300,7 +334,22 @@ fn palette_from_config(config: &ConfigHandle) -> ThemePalette {
         muted,
         bg,
         is_light,
+    })
+}
+
+fn is_current_theme_cache_hit(
+    cached_generation: usize,
+    generation: usize,
+    theme: CachedTheme,
+    current_appearance_is_dark: Option<bool>,
+) -> bool {
+    if cached_generation != generation {
+        return false;
     }
+    if !theme.appearance_sensitive {
+        return true;
+    }
+    theme.appearance_is_dark == current_appearance_is_dark
 }
 
 fn current_theme() -> CachedTheme {
@@ -309,13 +358,22 @@ fn current_theme() -> CachedTheme {
 
     let mut cached = THEME_CACHE.lock().unwrap();
     if let Some((cached_generation, theme)) = *cached {
-        if cached_generation == generation {
+        let current_appearance_is_dark = if theme.appearance_sensitive {
+            Some(is_macos_dark_mode())
+        } else {
+            None
+        };
+        if is_current_theme_cache_hit(
+            cached_generation,
+            generation,
+            theme,
+            current_appearance_is_dark,
+        ) {
             return theme;
         }
     }
 
-    let palette = palette_from_config(&config);
-    let theme = CachedTheme { palette };
+    let theme = theme_from_config(&config);
     *cached = Some((generation, theme));
     theme
 }
@@ -327,7 +385,8 @@ pub fn current_theme_palette() -> ThemePalette {
 #[cfg(test)]
 mod tests {
     use super::{
-        color_scheme_selection_from_content, parse_color_scheme_selection_line,
+        appearance_sensitive_theme, cached_theme, color_scheme_selection_from_content,
+        dark_palette, is_current_theme_cache_hit, parse_color_scheme_selection_line,
         ColorSchemeSelection,
     };
 
@@ -399,5 +458,19 @@ config.color_scheme = some_runtime_value
             color_scheme_selection_from_content(content),
             Some(ColorSchemeSelection::Other)
         );
+    }
+
+    #[test]
+    fn stable_cache_hit_requires_matching_generation() {
+        let theme = cached_theme(dark_palette());
+        assert!(is_current_theme_cache_hit(4, 4, theme, None));
+        assert!(!is_current_theme_cache_hit(4, 5, theme, None));
+    }
+
+    #[test]
+    fn appearance_sensitive_cache_hit_requires_matching_appearance() {
+        let theme = appearance_sensitive_theme(dark_palette(), true);
+        assert!(is_current_theme_cache_hit(7, 7, theme, Some(true)));
+        assert!(!is_current_theme_cache_hit(7, 7, theme, Some(false)));
     }
 }

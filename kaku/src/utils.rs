@@ -65,14 +65,12 @@ pub fn open_path_in_editor(path: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         match try_open_text(path) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
+            Ok(()) => return Ok(()),
             Err(err) => errors.push(err.to_string()),
         }
 
         match try_reveal_in_finder(path) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
+            Ok(()) => return Ok(()),
             Err(err) => errors.push(err.to_string()),
         }
     }
@@ -138,15 +136,15 @@ fn try_vscode(path: &Path) -> anyhow::Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
-fn try_open_text(path: &Path) -> anyhow::Result<bool> {
+fn try_open_text(path: &Path) -> anyhow::Result<()> {
     run_editor_command("open", &["-t".to_string()], path).context("launch macOS text editor")?;
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn try_reveal_in_finder(path: &Path) -> anyhow::Result<bool> {
+fn try_reveal_in_finder(path: &Path) -> anyhow::Result<()> {
     run_editor_command("open", &["-R".to_string()], path).context("reveal file in Finder")?;
-    Ok(true)
+    Ok(())
 }
 
 fn run_editor_command(program: &str, args: &[String], path: &Path) -> std::io::Result<()> {

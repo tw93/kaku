@@ -255,11 +255,11 @@ if [[ "$SIGNING_IDENTITY" == "-" ]]; then
 	fi
 fi
 
-codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE_OUT"
-
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
 touch "$APP_BUNDLE_OUT"
+
+codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE_OUT"
 
 if [[ "$APP_ONLY" == "1" ]]; then
 	echo "App bundle ready: $APP_BUNDLE_OUT"
@@ -352,7 +352,7 @@ EOF
 
 cleanup_volumes
 
-sync
+/bin/sync
 
 rm -rf "$DMG_PATH" "$TEMP_DMG_PATH" "$STAGING_DIR" "$DMG_BASE_PATH.dmg"
 mkdir -p "$STAGING_DIR"
@@ -405,7 +405,7 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
 		echo "Warning: Failed to configure Finder layout for DMG."
 	fi
 
-	sync
+		/bin/sync
 	hdiutil_cmd detach "$DEVICE" -force >/dev/null 2>&1 || true
 
 	if hdiutil_cmd convert -quiet "$TEMP_DMG_PATH" \

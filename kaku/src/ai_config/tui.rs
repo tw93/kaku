@@ -552,31 +552,52 @@ fn read_codex_auth_info() -> Option<(String, String)> {
 }
 
 fn read_sqlite_value_with_debug(path: &Path, query: &str, context: &str) -> Option<String> {
+    use rusqlite::types::ValueRef;
+    use rusqlite::{Connection, OpenFlags};
+
     if !path.exists() {
         log::debug!("{context}: sqlite db missing at {}", path.display());
         return None;
     }
 
-    let output = std::process::Command::new("/usr/bin/sqlite3")
-        .arg(path)
-        .arg(query)
-        .output()
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|err| log::debug!("{context}: sqlite open failed: {}", err))
         .ok()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::debug!(
-            "{context}: sqlite query failed with status {}: {}",
-            output.status,
-            stderr.trim()
-        );
+    let mut stmt = conn
+        .prepare(query)
+        .map_err(|err| log::debug!("{context}: sqlite prepare failed: {}", err))
+        .ok()?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|err| log::debug!("{context}: sqlite query failed: {}", err))
+        .ok()?;
+    let row = rows
+        .next()
+        .map_err(|err| log::debug!("{context}: sqlite row fetch failed: {}", err))
+        .ok()??;
+    let value = row
+        .get_ref(0)
+        .map_err(|err| log::debug!("{context}: sqlite value read failed: {}", err))
+        .ok()?;
+
+    let text = match value {
+        ValueRef::Null => return None,
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .map_err(|err| log::debug!("{context}: sqlite text value is not utf-8: {}", err))
+            .ok()?
+            .to_string(),
+        ValueRef::Blob(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|err| log::debug!("{context}: sqlite blob value is not utf-8: {}", err))
+            .ok()?,
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => value.to_string(),
+    };
+
+    let value = text.trim();
+    if value.is_empty() {
         return None;
     }
-
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|err| log::debug!("{context}: sqlite query returned non-utf8: {}", err))
-        .ok()?;
-    let value = stdout.trim();
-    (!value.is_empty()).then(|| value.to_string())
+    Some(value.to_string())
 }
 
 fn decode_base64_standard_with_debug(raw: &str, context: &str) -> Option<Vec<u8>> {
