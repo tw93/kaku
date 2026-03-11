@@ -107,7 +107,15 @@ fn run_app(
                 KeyCode::Right => {
                     app.adjust_selected_numeric(1);
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                KeyCode::Enter => {
+                    if app.activate_selected() {
+                        if let Err(e) = app.save_if_dirty() {
+                            return Err(e);
+                        }
+                        return Ok(());
+                    }
+                }
+                KeyCode::Char(' ') => {
                     app.start_edit();
                 }
                 _ => {}
@@ -840,6 +848,24 @@ impl App {
 
     pub(super) fn is_field_disabled(&self, lua_key: &str) -> bool {
         lua_key == ACTIVE_PANE_INDICATOR_SIZE_KEY && self.is_active_pane_indicator_off()
+    }
+
+    fn is_horizontal_adjust_field(lua_key: &str) -> bool {
+        Self::is_horizontal_option_field(lua_key) || Self::numeric_step_for(lua_key).is_some()
+    }
+
+    fn is_selected_horizontal_adjust_field(&self) -> bool {
+        let lua_key = self.fields[self.selected].lua_key;
+        Self::is_horizontal_adjust_field(lua_key) && !self.is_field_disabled(lua_key)
+    }
+
+    /// Returns true when activation should save+exit immediately.
+    fn activate_selected(&mut self) -> bool {
+        if self.is_selected_horizontal_adjust_field() {
+            return true;
+        }
+        self.start_edit();
+        false
     }
 
     fn item_count(&self) -> usize {
@@ -1620,6 +1646,142 @@ mod tests {
 
         app.fields[idx].value = "0".to_string();
         assert_eq!(app.to_lua_value(&app.fields[idx]), "1.00");
+    }
+
+    #[test]
+    fn save_config_writes_window_background_opacity_from_transparency_percent() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("kaku.lua");
+        std::fs::write(
+            &config_path,
+            "local wezterm = require 'wezterm'\nlocal config = {}\nreturn config\n",
+        )
+        .expect("write config");
+
+        let mut app = App::new(config_path.clone());
+        app.load_config();
+
+        let idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "window_background_opacity")
+            .expect("window_background_opacity field to exist");
+        app.fields[idx].value = "10".to_string();
+
+        app.save_config().expect("save config");
+
+        let written = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            written.contains("config.window_background_opacity = 0.90"),
+            "expected transparency 10% to persist as 0.90 opacity, wrote:\n{}",
+            written
+        );
+    }
+
+    #[test]
+    fn selected_horizontal_adjust_field_detects_numeric_and_option_fields() {
+        let mut app = test_app();
+
+        let font_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "font_size")
+            .expect("font_size field to exist");
+        app.selected = font_idx;
+        assert!(app.is_selected_horizontal_adjust_field());
+
+        let indicator_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "active_pane_indicator")
+            .expect("active_pane_indicator field to exist");
+        app.selected = indicator_idx;
+        assert!(app.is_selected_horizontal_adjust_field());
+
+        let transparency_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "window_background_opacity")
+            .expect("window_background_opacity field to exist");
+        app.selected = transparency_idx;
+        assert!(app.is_selected_horizontal_adjust_field());
+
+        let text_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "font")
+            .expect("font field to exist");
+        app.selected = text_idx;
+        assert!(!app.is_selected_horizontal_adjust_field());
+    }
+
+    #[test]
+    fn selected_horizontal_adjust_field_respects_disabled_state() {
+        let mut app = test_app();
+        let mode_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "active_pane_indicator")
+            .expect("active_pane_indicator field to exist");
+        let size_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "active_pane_indicator_size")
+            .expect("active_pane_indicator_size field to exist");
+
+        app.fields[mode_idx].value = "Off".to_string();
+        app.selected = size_idx;
+
+        assert!(!app.is_selected_horizontal_adjust_field());
+    }
+
+    #[test]
+    fn activate_selected_returns_exit_for_horizontal_adjust_fields() {
+        let mut app = test_app();
+
+        let font_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "font_size")
+            .expect("font_size field to exist");
+        app.selected = font_idx;
+
+        assert!(app.activate_selected());
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let indicator_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "active_pane_indicator")
+            .expect("active_pane_indicator field to exist");
+        app.selected = indicator_idx;
+
+        assert!(app.activate_selected());
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn activate_selected_enters_edit_or_select_for_non_horizontal_fields() {
+        let mut app = test_app();
+
+        let text_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "font")
+            .expect("font field to exist");
+        app.selected = text_idx;
+        assert!(!app.activate_selected());
+        assert!(matches!(app.mode, Mode::Editing));
+
+        app.mode = Mode::Normal;
+        let options_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "color_scheme")
+            .expect("color_scheme field to exist");
+        app.selected = options_idx;
+        assert!(!app.activate_selected());
+        assert!(matches!(app.mode, Mode::Selecting));
     }
 
     #[test]

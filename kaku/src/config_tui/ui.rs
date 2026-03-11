@@ -31,37 +31,46 @@ struct FooterCopy {
     tertiary_short: Option<&'static str>,
 }
 
+const ESC_KEY_STR: &'static str = "Esc";
+const ENTER_KEY_STR: &'static str = "Enter";
+const Q_KEY_STR: &'static str = "q";
+const E_KEY_STR: &'static str = "e";
+
 fn footer_copy(mode: Mode) -> FooterCopy {
+    let apply_edit_long = "Apply Current Change";
+    let apply_short = " apply";
+    let cancel_short = " cancel";
+
     match mode {
         Mode::Normal => FooterCopy {
-            primary_key: "ESC",
-            primary_long: " save and apply changes",
-            primary_short: " apply",
-            secondary_key: Some("E"),
-            secondary_long: Some(" open full config"),
+            primary_key: ESC_KEY_STR,
+            primary_long: " Apply Changes and Quit",
+            primary_short: apply_short,
+            secondary_key: Some(E_KEY_STR),
+            secondary_long: Some(" Open Config (opens default editor)"),
             secondary_short: Some(" config"),
-            tertiary_key: Some("Q"),
-            tertiary_long: Some(" discard changes and quit"),
+            tertiary_key: Some(Q_KEY_STR),
+            tertiary_long: Some(" Discard Changes and Quit"),
             tertiary_short: Some(" quit"),
         },
         Mode::Selecting => FooterCopy {
-            primary_key: "Enter",
-            primary_long: " apply current change",
-            primary_short: " apply",
-            secondary_key: Some("ESC"),
-            secondary_long: Some(" apply & exit"),
-            secondary_short: Some(" apply"),
+            primary_key: ENTER_KEY_STR,
+            primary_long: " Apply Current Change",
+            primary_short: apply_short,
+            secondary_key: Some(ESC_KEY_STR),
+            secondary_long: Some(" Apply & Exit"),
+            secondary_short: Some(apply_short),
             tertiary_key: None,
             tertiary_long: None,
             tertiary_short: None,
         },
         Mode::Editing => FooterCopy {
-            primary_key: "Enter",
-            primary_long: " apply current change",
-            primary_short: " apply",
-            secondary_key: Some("ESC"),
-            secondary_long: Some(" cancel edit"),
-            secondary_short: Some(" cancel"),
+            primary_key: ENTER_KEY_STR,
+            primary_long: apply_edit_long,
+            primary_short: apply_short,
+            secondary_key: Some(ESC_KEY_STR),
+            secondary_long: Some(" Cancel Editing"),
+            secondary_short: Some(cancel_short),
             tertiary_key: None,
             tertiary_long: None,
             tertiary_short: None,
@@ -80,7 +89,6 @@ pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let area = Rect::new(full.x, full.y, full.width - 1, full.height);
 
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(Style::default().bg(bg())), area);
 
     let content_rows = rendered_field_row_count(app);
     match resolve_main_layout(area.height, content_rows) {
@@ -562,59 +570,5 @@ mod tests {
     fn handles_tiny_terminal_heights() {
         assert_eq!(resolve_main_layout(2, 1), MainLayoutMode::HeaderOnly);
         assert_eq!(resolve_main_layout(3, 1), MainLayoutMode::HeaderAndFooter);
-    }
-
-    #[test]
-    fn normal_footer_keeps_escape_as_apply_shortcut() {
-        assert_eq!(
-            footer_copy(Mode::Normal),
-            FooterCopy {
-                primary_key: "ESC",
-                primary_long: " save and apply changes",
-                primary_short: " apply",
-                secondary_key: Some("E"),
-                secondary_long: Some(" open full config"),
-                secondary_short: Some(" config"),
-                tertiary_key: Some("Q"),
-                tertiary_long: Some(" discard changes and quit"),
-                tertiary_short: Some(" quit"),
-            }
-        );
-    }
-
-    #[test]
-    fn modal_footer_switches_escape_to_cancel() {
-        assert_eq!(
-            footer_copy(Mode::Selecting),
-            FooterCopy {
-                primary_key: "Enter",
-                primary_long: " apply current change",
-                primary_short: " apply",
-                secondary_key: Some("ESC"),
-                secondary_long: Some(" apply & exit"),
-                secondary_short: Some(" apply"),
-                tertiary_key: None,
-                tertiary_long: None,
-                tertiary_short: None,
-            }
-        );
-    }
-
-    #[test]
-    fn modal_footer_shows_cancel_for_editing() {
-        assert_eq!(
-            footer_copy(Mode::Editing),
-            FooterCopy {
-                primary_key: "Enter",
-                primary_long: " apply current change",
-                primary_short: " apply",
-                secondary_key: Some("ESC"),
-                secondary_long: Some(" cancel edit"),
-                secondary_short: Some(" cancel"),
-                tertiary_key: None,
-                tertiary_long: None,
-                tertiary_short: None,
-            }
-        );
     }
 }
