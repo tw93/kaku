@@ -122,6 +122,63 @@ fn toast_colors_for_palette(
     }
 }
 
+fn transparent_strip_rects(
+    window_width: f32,
+    window_height: f32,
+    top_fill_height: f32,
+    bottom_fill_height: f32,
+    right_fill_width: f32,
+    top_tab_bar_height: f32,
+    bottom_tab_bar_height: f32,
+) -> (
+    Option<::window::RectF>,
+    Option<::window::RectF>,
+    Option<::window::RectF>,
+) {
+    let top = if top_fill_height > 0.0 {
+        Some(euclid::rect(
+            0.0,
+            0.0,
+            window_width,
+            top_fill_height.min(window_height),
+        ))
+    } else {
+        None
+    };
+
+    let bottom = if bottom_fill_height > 0.0 {
+        let clamped_height = bottom_fill_height.min(window_height);
+        Some(euclid::rect(
+            0.0,
+            (window_height - clamped_height).max(0.0),
+            window_width,
+            clamped_height,
+        ))
+    } else {
+        None
+    };
+
+    let right = if right_fill_width > 0.0 {
+        let clamped_width = right_fill_width.min(window_width);
+        let right_fill_y = (top_fill_height + top_tab_bar_height).min(window_height);
+        let right_fill_height = (window_height
+            - right_fill_y
+            - bottom_fill_height.min(window_height)
+            - bottom_tab_bar_height.min(window_height))
+        .max(0.0);
+        Some(euclid::rect(
+            window_width - clamped_width,
+            right_fill_y,
+            clamped_width,
+            right_fill_height,
+        ))
+    } else {
+        None
+    };
+
+    (top, bottom, right)
+}
+
 impl crate::TermWindow {
     pub fn paint_impl(&mut self, frame: &mut RenderFrame) -> anyhow::Result<()> {
         self.num_frames += 1;
@@ -361,53 +418,29 @@ impl crate::TermWindow {
                     self.effective_right_padding(&self.config) as f32 + border.right.get() as f32;
                 let window_width = self.dimensions.pixel_width as f32;
                 let window_height = self.dimensions.pixel_height as f32;
+                let (top_rect, bottom_rect, right_rect) = transparent_strip_rects(
+                    window_width,
+                    window_height,
+                    top_fill_height,
+                    bottom_fill_height,
+                    right_fill_width,
+                    top_tab_bar_height,
+                    bottom_tab_bar_height,
+                );
 
-                if top_fill_height > 0.0 {
-                    self.filled_rectangle(
-                        &mut layers,
-                        0,
-                        euclid::rect(0.0, 0.0, window_width, top_fill_height.min(window_height)),
-                        strip_background,
-                    )
-                    .context("filled_rectangle for transparent top strip")?;
+                if let Some(rect) = top_rect {
+                    self.filled_rectangle(&mut layers, 0, rect, strip_background)
+                        .context("filled_rectangle for transparent top strip")?;
                 }
 
-                if bottom_fill_height > 0.0 {
-                    let clamped_height = bottom_fill_height.min(window_height);
-                    self.filled_rectangle(
-                        &mut layers,
-                        0,
-                        euclid::rect(
-                            0.0,
-                            (window_height - clamped_height).max(0.0),
-                            window_width,
-                            clamped_height,
-                        ),
-                        strip_background,
-                    )
-                    .context("filled_rectangle for transparent bottom strip")?;
+                if let Some(rect) = bottom_rect {
+                    self.filled_rectangle(&mut layers, 0, rect, strip_background)
+                        .context("filled_rectangle for transparent bottom strip")?;
                 }
 
-                if right_fill_width > 0.0 {
-                    let clamped_width = right_fill_width.min(window_width);
-                    let right_fill_y = (top_fill_height + top_tab_bar_height).min(window_height);
-                    let right_fill_height = (window_height
-                        - right_fill_y
-                        - bottom_fill_height.min(window_height)
-                        - bottom_tab_bar_height.min(window_height))
-                    .max(0.0);
-                    self.filled_rectangle(
-                        &mut layers,
-                        0,
-                        euclid::rect(
-                            window_width - clamped_width,
-                            right_fill_y,
-                            clamped_width,
-                            right_fill_height,
-                        ),
-                        strip_background,
-                    )
-                    .context("filled_rectangle for transparent right strip")?;
+                if let Some(rect) = right_rect {
+                    self.filled_rectangle(&mut layers, 0, rect, strip_background)
+                        .context("filled_rectangle for transparent right strip")?;
                 }
             }
             _ => {
@@ -935,7 +968,7 @@ mod tests {
     use super::{
         active_pane_gutter_radius, active_pane_indicator_bounds, active_pane_indicator_size_px,
         active_pane_left_indicator_segment, active_pane_left_pill_segment,
-        toast_colors_for_palette,
+        toast_colors_for_palette, transparent_strip_rects,
     };
     use wezterm_term::color::{ColorPalette, SrgbaTuple};
     use window::color::LinearRgba;
@@ -1060,5 +1093,30 @@ mod tests {
         assert!((pill.height() - 30.0).abs() < 0.001);
         assert!((pill.min_x() - 14.0).abs() < 0.001);
         assert!((pill.min_y() - 105.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn transparent_strip_rects_exclude_tab_bar_regions() {
+        let (top, bottom, right) =
+            transparent_strip_rects(500.0, 300.0, 20.0, 10.0, 12.0, 24.0, 30.0);
+
+        let top = top.expect("top");
+        let bottom = bottom.expect("bottom");
+        let right = right.expect("right");
+
+        assert!((top.height() - 20.0).abs() < 0.001);
+        assert!((right.min_y() - 44.0).abs() < 0.001);
+        assert!((right.max_y() - (300.0 - 10.0 - 30.0)).abs() < 0.001);
+        assert!(right.min_y() >= top.max_y());
+        assert!(right.max_y() <= bottom.min_y());
+    }
+
+    #[test]
+    fn transparent_strip_rects_skip_zero_sized_strips() {
+        let (top, bottom, right) = transparent_strip_rects(500.0, 300.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+        assert!(top.is_none());
+        assert!(bottom.is_none());
+        assert!(right.is_none());
     }
 }
