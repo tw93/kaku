@@ -1,4 +1,5 @@
 .PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback pr_check bump build-release major minor patch
+.PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback pr_check bump build-release major minor patch
 
 all: build
 
@@ -7,6 +8,7 @@ RUST_LOG ?= info
 test:
 	cargo nextest run --locked -E 'not test(shapecache::test::ligatures_jetbrains)'
 	cargo nextest run --locked -p wezterm-escape-parser # no_std by default
+
 
 
 check:
