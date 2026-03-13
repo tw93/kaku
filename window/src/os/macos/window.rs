@@ -3117,31 +3117,20 @@ fn get_window_class() -> &'static Class {
             }
         }
 
-        /// Override constrainFrameRect:toScreen: to allow window management tools
-        /// (like Raycast) to maximize windows properly without resize increments
-        /// preventing the window from filling the screen completely.
+        /// Override constrainFrameRect:toScreen: to accept any requested frame
+        /// without modification. This prevents tiling window managers (AeroSpace,
+        /// yabai, etc.) from entering a feedback loop where the WM requests an
+        /// exact size, AppKit adjusts it (resize increments or screen clamping),
+        /// the WM detects the mismatch and re-requests, causing flicker.
         /// <https://github.com/tw93/Kaku/issues/131>
+        /// <https://github.com/tw93/Kaku/issues/183>
         extern "C" fn constrain_frame_rect(
-            this: &mut Object,
+            _this: &mut Object,
             _sel: Sel,
             frame_rect: NSRect,
-            screen: id,
+            _screen: id,
         ) -> NSRect {
-            if screen.is_null() {
-                return frame_rect;
-            }
-            unsafe {
-                let visible_frame: NSRect = msg_send![screen, visibleFrame];
-                let width_diff = (frame_rect.size.width - visible_frame.size.width).abs();
-                let height_diff = (frame_rect.size.height - visible_frame.size.height).abs();
-                // If the frame is very close to the screen's visible frame size,
-                // return the visible frame to bypass resize increment constraints.
-                if width_diff < 50.0 && height_diff < 50.0 {
-                    return visible_frame;
-                }
-                // Otherwise, call super to apply normal constraints
-                msg_send![super(this, class!(NSWindow)), constrainFrameRect:frame_rect toScreen:screen]
-            }
+            frame_rect
         }
 
         unsafe {
