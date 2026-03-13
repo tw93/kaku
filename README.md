@@ -77,12 +77,13 @@ Kaku comes with intuitive macOS-native shortcuts:
 
 Kaku comes with a carefully curated shell stack for immediate productivity, so you can focus on AI coding without opening vscode:
 
-Built-in zsh plugins bundled by default:
+Built-in shell stack defaults are:
 
 - **z**: A smarter cd command that learns your most used directories for instant navigation.
 - **zsh-completions**: Extended command and subcommand completion definitions.
 - **Syntax Highlighting**: Real-time command validation and coloring.
 - **Autosuggestions**: Intelligent, history-based completions similar to Fish shell.
+- **Fish-friendly integration**: `kaku init` now can provision `~/.config/kaku/fish/kaku.fish` for fish users, and `kaku doctor` verifies both zsh/fish integration paths.
 
 Optional CLI tools installed via Homebrew during `kaku init`:
 
@@ -101,6 +102,16 @@ If you already use your own Zsh completion workflow such as `fzf-tab`, Kaku's Sm
 export KAKU_SMART_TAB_DISABLE=1
 [[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"
 [[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"
+```
+
+```fish
+set -gx KAKU_SMART_TAB_DISABLE 1
+if not contains -- "$HOME/.config/kaku/fish/bin" $PATH
+  set -gx PATH "$HOME/.config/kaku/fish/bin" $PATH
+end
+if test -f "$HOME/.config/kaku/fish/kaku.fish"
+  source "$HOME/.config/kaku/fish/kaku.fish"
+fi
 ```
 
 You can also remap true-color output from specific apps to keep theme consistency:

@@ -220,20 +220,29 @@ fn build_health_group(overall_status: DoctorStatus, summary: &DoctorSummary) -> 
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum KakuShell {
+    Zsh,
+    Fish,
+}
+
 fn build_environment_group() -> DoctorGroup {
     let mut checks = Vec::new();
-
-    let shell = std::env::var("SHELL").ok();
+    let shell = std::env::var("KAKU_TARGET_SHELL")
+        .ok()
+        .or_else(|| std::env::var("SHELL").ok());
     let shell_name = shell
         .as_deref()
         .and_then(|s| Path::new(s).file_name())
         .and_then(OsStr::to_str)
         .unwrap_or("");
+    let shell_is_fish = shell_name == "fish";
     let shell_is_zsh = shell_name == "zsh";
+    let target_shell = detect_target_shell();
 
     checks.push(DoctorCheck {
         title: "Current Shell Environment",
-        status: if shell_is_zsh {
+        status: if shell_is_fish || shell_is_zsh {
             DoctorStatus::Ok
         } else if shell.is_some() {
             DoctorStatus::Warn
@@ -242,23 +251,27 @@ fn build_environment_group() -> DoctorGroup {
         },
         summary: match &shell {
             Some(value) if shell_is_zsh => format!("SHELL is {value}"),
-            Some(value) => format!("SHELL is {value} and not zsh"),
+            Some(value) if shell_is_fish => format!("SHELL is {value}"),
+            Some(value) => format!("SHELL is {value} and not managed by default"),
             None => "SHELL is not set".to_string(),
         },
         details: vec![
-            "Kaku shell integration currently targets zsh for PATH injection and managed shell config"
+            format!(
+                "Kaku shell integration currently targets {} for PATH injection and managed shell config",
+                shell_name_if_known(target_shell)
+            )
                 .to_string(),
             "Doctor reports the current process environment. GUI-launched apps can differ from a Terminal login shell."
                 .to_string(),
         ],
-        fix: if !shell_is_zsh {
-            Some("Use zsh or add ~/.config/kaku/zsh/bin to your shell PATH manually".to_string())
+        fix: if !shell_is_zsh && !shell_is_fish {
+            Some("Use zsh/fish or add the managed Kaku bin directory to your shell PATH manually".to_string())
         } else {
             None
         },
     });
 
-    let managed_bin = managed_bin_dir();
+    let managed_bin = managed_bin_dir(target_shell);
     let path_entries: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     let path_has_managed_bin = path_entries.iter().any(|entry| entry == &managed_bin);
@@ -275,27 +288,43 @@ fn build_environment_group() -> DoctorGroup {
             format!("PATH is missing {}", managed_bin.display())
         },
         details: vec![
-            "Kaku command wrapper is expected at ~/.config/kaku/zsh/bin/kaku".to_string(),
-            "This PATH entry is normally added by a managed PATH line in ~/.zshrc".to_string(),
+            format!(
+                "Kaku command wrapper is expected at {}",
+                managed_bin_dir(target_shell).display()
+            ),
+            match target_shell {
+                KakuShell::Fish => "This PATH entry is normally added by a managed config line in ~/.config/fish/config.fish".to_string(),
+                KakuShell::Zsh => "This PATH entry is normally added by a managed PATH line in ~/.zshrc".to_string(),
+            },
             "PATH in Doctor reflects the current process environment and can differ between GUI and Terminal launches."
                 .to_string(),
         ],
         fix: if path_has_managed_bin {
             None
         } else {
-            Some("Run `kaku init --update-only` and restart zsh with `exec zsh -l`".to_string())
+            Some(format!(
+                "Run `kaku init --update-only` and restart with `exec {}`",
+                shell_exec_command(target_shell)
+            ))
         },
     });
 
     let zdotdir = std::env::var_os("ZDOTDIR").map(PathBuf::from);
     checks.push(DoctorCheck {
-        title: "Zsh Config Target Path",
+        title: "Shell Config Target Path",
         status: DoctorStatus::Info,
-        summary: match &zdotdir {
-            Some(dir) => format!("ZDOTDIR is {}", dir.display()),
-            None => "ZDOTDIR is not set and ~/.zshrc is used".to_string(),
+        summary: if target_shell == KakuShell::Fish {
+            format!("Fish config: {}", fish_config_path().display())
+        } else {
+            match &zdotdir {
+                Some(dir) => format!("ZDOTDIR is {}", dir.display()),
+                None => "ZDOTDIR is not set and ~/.zshrc is used".to_string(),
+            }
         },
-        details: vec![format!("Expected zshrc path: {}", zshrc_path().display())],
+        details: vec![format!(
+            "Expected config path: {}",
+            shell_config_path(target_shell).display()
+        )],
         fix: None,
     });
 
@@ -308,11 +337,15 @@ fn build_environment_group() -> DoctorGroup {
 
 fn build_shell_integration_group() -> DoctorGroup {
     let mut checks = Vec::new();
+    let target_shell = detect_target_shell();
 
-    let init_file = managed_init_file();
+    let init_file = managed_init_file(target_shell);
     let init_exists = init_file.is_file();
     checks.push(DoctorCheck {
-        title: "Managed Zsh Init File",
+        title: match target_shell {
+            KakuShell::Fish => "Managed Fish Init File",
+            KakuShell::Zsh => "Managed Zsh Init File",
+        },
         status: if init_exists {
             DoctorStatus::Ok
         } else {
@@ -331,7 +364,7 @@ fn build_shell_integration_group() -> DoctorGroup {
         },
     });
 
-    let wrapper = managed_wrapper_path();
+    let wrapper = managed_wrapper_path(target_shell);
     let wrapper_exists = wrapper.is_file();
     let wrapper_exec = config::is_executable_file(&wrapper);
     checks.push(DoctorCheck {
@@ -369,47 +402,106 @@ fn build_shell_integration_group() -> DoctorGroup {
         },
     });
 
-    let zshrc = zshrc_path();
-    let source_check = check_zshrc_source_line(&zshrc);
+    let shell_config = shell_config_path(target_shell);
+    let source_check = match target_shell {
+        KakuShell::Zsh => {
+            let check = check_zshrc_source_line(&shell_config);
+            ShellSourceCheck::Zsh(check)
+        }
+        KakuShell::Fish => {
+            let check = check_fish_config_line(&shell_config);
+            ShellSourceCheck::Fish(check)
+        }
+    };
     checks.push(DoctorCheck {
-        title: "zshrc Sources Kaku Init",
-        status: if source_check.read_error.is_some() {
-            DoctorStatus::Fail
-        } else if source_check.has_active_lines() && !source_check.has_legacy_guarded_lines() {
-            DoctorStatus::Ok
-        } else {
-            DoctorStatus::Warn
+        title: match target_shell {
+            KakuShell::Fish => "fish config Sources Kaku Init",
+            KakuShell::Zsh => "zshrc Sources Kaku Init",
         },
-        summary: if let Some(err) = &source_check.read_error {
-            format!("Could not read {}: {}", zshrc.display(), err)
-        } else if source_check.missing_file {
-            format!("No zshrc file found at {}", zshrc.display())
-        } else if source_check.has_legacy_guarded_lines() {
-            format!(
-                "Found {} active Kaku source line(s), including {} legacy guarded line(s) in {}",
-                source_check.guarded_active_lines + source_check.unguarded_active_lines,
-                source_check.guarded_active_lines,
-                zshrc.display()
-            )
-        } else if source_check.has_active_lines() {
-            format!(
-                "Found {} active Kaku source line(s) in {}",
-                source_check.guarded_active_lines + source_check.unguarded_active_lines,
-                zshrc.display()
-            )
-        } else {
-            format!("No active Kaku source line in {}", zshrc.display())
+        status: match &source_check {
+            ShellSourceCheck::Zsh(check) => {
+                if check.read_error.is_some() {
+                    DoctorStatus::Fail
+                } else if check.has_active_lines() && !check.has_legacy_guarded_lines() {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Warn
+                }
+            }
+            ShellSourceCheck::Fish(check) => {
+                if check.read_error.is_some() {
+                    DoctorStatus::Fail
+                } else if check.has_active_lines() {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Warn
+                }
+            }
         },
-        details: source_check.details(&zshrc),
-        fix: if source_check.read_error.is_some() {
-            Some(format!(
-                "Fix permissions or path access for {} then run `kaku doctor` again",
-                zshrc.display()
-            ))
-        } else if source_check.has_active_lines() && !source_check.has_legacy_guarded_lines() {
-            None
-        } else {
-            Some("Run `kaku init --update-only`".to_string())
+        summary: match &source_check {
+            ShellSourceCheck::Zsh(check) => {
+                if let Some(err) = &check.read_error {
+                    format!("Could not read {}: {}", shell_config.display(), err)
+                } else if check.missing_file {
+                    format!("No {} file found at {}", shell_config_label(target_shell), shell_config.display())
+                } else if check.has_legacy_guarded_lines() {
+                    format!(
+                        "Found {} active Kaku source line(s), including {} legacy guarded line(s) in {}",
+                        check.guarded_active_lines + check.unguarded_active_lines,
+                        check.guarded_active_lines,
+                        shell_config.display()
+                    )
+                } else if check.has_active_lines() {
+                    format!(
+                        "Found {} active Kaku source line(s) in {}",
+                        check.guarded_active_lines + check.unguarded_active_lines,
+                        shell_config.display()
+                    )
+                } else {
+                    format!("No active Kaku source line in {}", shell_config.display())
+                }
+            }
+            ShellSourceCheck::Fish(check) => {
+                if let Some(err) = &check.read_error {
+                    format!("Could not read {}: {}", shell_config.display(), err)
+                } else if check.missing_file {
+                    format!("No {} file found at {}", shell_config_label(target_shell), shell_config.display())
+                } else if check.has_active_lines() {
+                    format!("Found {} active Kaku source line(s) in {}", check.active_lines, shell_config.display())
+                } else {
+                    format!("No active Kaku source line in {}", shell_config.display())
+                }
+            }
+        },
+        details: match &source_check {
+            ShellSourceCheck::Zsh(check) => check.details(&shell_config),
+            ShellSourceCheck::Fish(check) => check.details(),
+        },
+        fix: match &source_check {
+            ShellSourceCheck::Zsh(check) => {
+                if check.read_error.is_some() {
+                    Some(format!(
+                        "Fix permissions or path access for {} then run `kaku doctor` again",
+                        shell_config.display()
+                    ))
+                } else if check.has_active_lines() && !check.has_legacy_guarded_lines() {
+                    None
+                } else {
+                    Some("Run `kaku init --update-only`".to_string())
+                }
+            }
+            ShellSourceCheck::Fish(check) => {
+                if check.read_error.is_some() {
+                    Some(format!(
+                        "Fix permissions or path access for {} then run `kaku doctor` again",
+                        shell_config.display()
+                    ))
+                } else if check.has_active_lines() {
+                    None
+                } else {
+                    Some("Run `kaku init --update-only`".to_string())
+                }
+            }
         },
     });
 
@@ -450,7 +542,8 @@ fn build_runtime_group() -> DoctorGroup {
         },
     });
 
-    let wrapper = managed_wrapper_path();
+    let target_shell = detect_target_shell();
+    let wrapper = managed_wrapper_path(target_shell);
     let wrapper_probe = probe_wrapper(&wrapper);
     checks.push(DoctorCheck {
         title: "Wrapper Execution Probe",
@@ -460,13 +553,13 @@ fn build_runtime_group() -> DoctorGroup {
         fix: wrapper_probe.fix,
     });
 
-    let login_zsh_probe = probe_login_zsh_integration();
+    let login_shell_probe = probe_login_shell_integration();
     checks.push(DoctorCheck {
-        title: "Login Zsh Integration Probe",
-        status: login_zsh_probe.status,
-        summary: login_zsh_probe.summary,
-        details: login_zsh_probe.details,
-        fix: login_zsh_probe.fix,
+        title: "Login Shell Integration Probe",
+        status: login_shell_probe.status,
+        summary: login_shell_probe.summary,
+        details: login_shell_probe.details,
+        fix: login_shell_probe.fix,
     });
 
     DoctorGroup {
@@ -474,6 +567,124 @@ fn build_runtime_group() -> DoctorGroup {
         status: group_status(&checks),
         checks,
     }
+}
+
+enum ShellSourceCheck {
+    Zsh(ZshrcSourceCheck),
+    Fish(FishConfigCheck),
+}
+
+#[derive(Default)]
+struct FishConfigCheck {
+    active_lines: usize,
+    read_error: Option<String>,
+    missing_file: bool,
+}
+
+impl FishConfigCheck {
+    fn has_active_lines(&self) -> bool {
+        self.active_lines > 0
+    }
+
+    fn details(&self) -> Vec<String> {
+        let mut details = Vec::new();
+        if let Some(err) = &self.read_error {
+            details.push(format!("Read error: {}", err));
+            return details;
+        }
+        if self.missing_file {
+            details.push("config file does not exist yet".to_string());
+        }
+        if self.active_lines > 0 {
+            details.push(format!("Active Kaku source lines: {}", self.active_lines));
+        } else {
+            details.push("Expected an active line that sources ~/.config/kaku/fish/kaku.fish".to_string());
+        }
+        details
+    }
+}
+
+fn check_fish_config_line(config_path: &Path) -> FishConfigCheck {
+    let mut result = FishConfigCheck::default();
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                result.missing_file = true;
+            } else {
+                result.read_error = Some(err.to_string());
+            }
+            return result;
+        }
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains("kaku/fish/kaku.fish") {
+            result.active_lines += 1;
+        }
+    }
+
+    result
+}
+
+fn detect_target_shell() -> KakuShell {
+    if let Some(shell) = std::env::var("KAKU_TARGET_SHELL").ok()
+        .filter(|shell| !shell.trim().is_empty())
+    {
+        return shell_from_candidate_path(&shell);
+    }
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    shell_from_candidate_path(&shell)
+}
+
+fn shell_from_candidate_path(shell: &str) -> KakuShell {
+    let file = Path::new(shell)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(shell);
+    let file = file.to_lowercase();
+    if file.ends_with("fish") || file == "fish" {
+        KakuShell::Fish
+    } else {
+        KakuShell::Zsh
+    }
+}
+
+fn shell_name_if_known(shell: KakuShell) -> &'static str {
+    match shell {
+        KakuShell::Fish => "fish",
+        KakuShell::Zsh => "zsh",
+    }
+}
+
+fn shell_exec_command(shell: KakuShell) -> &'static str {
+    match shell {
+        KakuShell::Fish => "exec fish",
+        KakuShell::Zsh => "exec zsh",
+    }
+}
+
+fn shell_config_label(shell: KakuShell) -> &'static str {
+    match shell {
+        KakuShell::Fish => "fish config",
+        KakuShell::Zsh => "zshrc",
+    }
+}
+
+fn shell_config_path(shell: KakuShell) -> PathBuf {
+    match shell {
+        KakuShell::Fish => fish_config_path(),
+        KakuShell::Zsh => zshrc_path(),
+    }
+}
+
+fn fish_config_path() -> PathBuf {
+    home_dir().join(".config").join("fish").join("config.fish")
 }
 
 fn group_status(checks: &[DoctorCheck]) -> DoctorStatus {
@@ -787,6 +998,13 @@ fn probe_wrapper(wrapper: &Path) -> DoctorCheck {
     }
 }
 
+fn probe_login_shell_integration() -> DoctorCheck {
+    match detect_target_shell() {
+        KakuShell::Fish => probe_login_fish_integration(),
+        KakuShell::Zsh => probe_login_zsh_integration(),
+    }
+}
+
 fn probe_login_zsh_integration() -> DoctorCheck {
     DoctorCheck {
         title: "Login Zsh Integration Probe",
@@ -800,28 +1018,50 @@ fn probe_login_zsh_integration() -> DoctorCheck {
     }
 }
 
+fn probe_login_fish_integration() -> DoctorCheck {
+    DoctorCheck {
+        title: "Login Fish Integration Probe",
+        status: DoctorStatus::Info,
+        summary: "Skipped interactive login fish probe to avoid shell side effects".to_string(),
+        details: vec![
+            "Doctor does not execute `/bin/fish -l` because interactive login startup files can run user-defined commands, plugin managers, and network actions.".to_string(),
+            "Use `exec fish -l` manually and verify `echo $KAKU_SHELL` if you need end-to-end runtime validation.".to_string(),
+        ],
+        fix: None,
+    }
+}
+
 fn home_dir() -> PathBuf {
     config::HOME_DIR.clone()
 }
 
-fn managed_bin_dir() -> PathBuf {
+fn managed_bin_dir(shell: KakuShell) -> PathBuf {
     home_dir()
         .join(".config")
         .join("kaku")
-        .join("zsh")
+        .join(match shell {
+            KakuShell::Fish => "fish",
+            KakuShell::Zsh => "zsh",
+        })
         .join("bin")
 }
 
-fn managed_wrapper_path() -> PathBuf {
-    managed_bin_dir().join("kaku")
+fn managed_wrapper_path(shell: KakuShell) -> PathBuf {
+    managed_bin_dir(shell).join("kaku")
 }
 
-fn managed_init_file() -> PathBuf {
+fn managed_init_file(shell: KakuShell) -> PathBuf {
     home_dir()
         .join(".config")
         .join("kaku")
-        .join("zsh")
-        .join("kaku.zsh")
+        .join(match shell {
+            KakuShell::Fish => "fish",
+            KakuShell::Zsh => "zsh",
+        })
+        .join(match shell {
+            KakuShell::Fish => "kaku.fish",
+            KakuShell::Zsh => "kaku.zsh",
+        })
 }
 
 fn zshrc_path() -> PathBuf {

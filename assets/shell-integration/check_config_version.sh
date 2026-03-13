@@ -24,8 +24,19 @@ source "$COMMON_SCRIPT"
 
 CURRENT_CONFIG_VERSION="$(read_bundled_config_version "$SCRIPT_DIR")"
 
-# Determine resource dir (always derive from script location, not hardcoded path)
+detect_kaku_setup_script() {
+	case "${KAKU_TARGET_SHELL:-${SHELL:-/bin/zsh}}" in
+		*fish|fish)
+			printf 'setup_fish.sh'
+			;;
+		*)
+			printf 'setup_zsh.sh'
+			;;
+	esac
+}
+
 RESOURCE_DIR="$SCRIPT_DIR"
+SETUP_SCRIPT="$RESOURCE_DIR/$(detect_kaku_setup_script)"
 TOOLS_SCRIPT="$RESOURCE_DIR/install_cli_tools.sh"
 
 user_version="$(read_config_version)"
@@ -83,10 +94,10 @@ if [[ $REPLY =~ ^[Nn]$ ]]; then
 fi
 
 # Apply updates
-if [[ -f "$RESOURCE_DIR/setup_zsh.sh" ]]; then
-	KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$RESOURCE_DIR/setup_zsh.sh" --update-only
+if [[ -f "$SETUP_SCRIPT" ]]; then
+	KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT" --update-only
 else
-	echo -e "${YELLOW}Error: missing setup script at $RESOURCE_DIR/setup_zsh.sh${NC}"
+	echo -e "${YELLOW}Error: missing setup script at $SETUP_SCRIPT${NC}"
 	exit 1
 fi
 

@@ -235,7 +235,10 @@ if [[ -f "assets/logo.icns" ]]; then
 	cp "assets/logo.icns" "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 fi
 
-tic -xe kaku -o "$APP_BUNDLE_OUT/Contents/Resources/terminfo" termwiz/data/kaku.terminfo
+if ! tic -xe kaku -o "$APP_BUNDLE_OUT/Contents/Resources/terminfo" termwiz/data/kaku.terminfo; then
+	echo "Warning: 'tic -xe' failed (some ncurses/tic variants). Falling back to full compile mode."
+	tic -x -o "$APP_BUNDLE_OUT/Contents/Resources/terminfo" termwiz/data/kaku.terminfo
+fi
 
 for bin in kaku kaku-gui; do
 	cp "$BIN_DIR/$bin" "$APP_BUNDLE_OUT/Contents/MacOS/$bin"
