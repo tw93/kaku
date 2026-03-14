@@ -30,18 +30,24 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
+    use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
 
     pub fn run(update_only: bool) -> anyhow::Result<()> {
+        let shell = detect_target_shell();
         ensure_user_config().context("ensure user config exists")?;
 
-        install_kaku_wrapper().context("install kaku wrapper")?;
+        install_kaku_wrapper(shell).context("install kaku wrapper")?;
 
-        let script = resolve_setup_script()
-            .ok_or_else(|| anyhow!("failed to locate setup_zsh.sh for Kaku initialization"))?;
+        let script = resolve_setup_script(shell)
+            .ok_or_else(|| anyhow!("failed to locate {} for Kaku initialization", shell.setup_script_name()))?;
 
         let mut cmd = Command::new("/bin/bash");
         cmd.arg(&script).env("KAKU_INIT_INTERNAL", "1");
+        cmd.env(
+            "KAKU_TARGET_SHELL",
+            shell.wrapper_dir(),
+        );
         if update_only {
             cmd.arg("--update-only");
         }
@@ -56,8 +62,56 @@ mod imp {
         bail!("kaku init failed with status {}", status);
     }
 
-    fn install_kaku_wrapper() -> anyhow::Result<()> {
-        let wrapper_path = wrapper_path();
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum KakuShell {
+        Zsh,
+        Fish,
+    }
+
+    impl KakuShell {
+        fn setup_script_name(&self) -> &'static str {
+            match self {
+                Self::Zsh => "setup_zsh.sh",
+                Self::Fish => "setup_fish.sh",
+            }
+        }
+
+        fn wrapper_dir(&self) -> &'static str {
+            match self {
+                Self::Zsh => "zsh",
+                Self::Fish => "fish",
+            }
+        }
+    }
+
+    fn detect_target_shell() -> KakuShell {
+        if let Some(shell) = parse_shell_env("KAKU_TARGET_SHELL") {
+            return shell;
+        }
+
+        if let Some(shell) = parse_shell_env("SHELL") {
+            return shell;
+        }
+
+        KakuShell::Zsh
+    }
+
+    fn parse_shell_env(var: &str) -> Option<KakuShell> {
+        std::env::var_os(var).and_then(sanitize_shell_name).map(|shell| match shell.as_str() {
+            "fish" => KakuShell::Fish,
+            _ => KakuShell::Zsh,
+        })
+    }
+
+    fn sanitize_shell_name(shell: OsString) -> Option<String> {
+        shell.into_string().ok().map(|s| {
+            let s = s.trim().to_lowercase();
+            s.rsplit('/').next().unwrap_or("").to_string()
+        })
+    }
+
+    fn install_kaku_wrapper(shell: KakuShell) -> anyhow::Result<()> {
+        let wrapper_path = wrapper_path(shell);
         let wrapper_dir = wrapper_path
             .parent()
             .ok_or_else(|| anyhow!("invalid wrapper path"))?;
@@ -107,11 +161,11 @@ exit 127
         Ok(())
     }
 
-    fn wrapper_path() -> PathBuf {
+    fn wrapper_path(shell: KakuShell) -> PathBuf {
         config::HOME_DIR
             .join(".config")
             .join("kaku")
-            .join("zsh")
+            .join(shell.wrapper_dir())
             .join("bin")
             .join("kaku")
     }
@@ -167,33 +221,37 @@ exit 127
             .replace('`', "\\`")
     }
 
-    fn resolve_setup_script() -> Option<PathBuf> {
+    fn resolve_setup_script(shell: KakuShell) -> Option<PathBuf> {
+        let script = shell.setup_script_name();
         let mut candidates = Vec::new();
 
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(
-                cwd.join("assets")
-                    .join("shell-integration")
-                    .join("setup_zsh.sh"),
-            );
+            candidates.push(cwd.join("assets").join("shell-integration").join(script));
         }
 
         if let Ok(exe) = std::env::current_exe() {
             if let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) {
-                candidates.push(contents_dir.join("Resources").join("setup_zsh.sh"));
+                candidates.push(contents_dir.join("Resources").join(script));
             }
         }
 
-        candidates.push(PathBuf::from(
-            "/Applications/Kaku.app/Contents/Resources/setup_zsh.sh",
-        ));
+        candidates.push(
+            config::HOME_DIR
+                .join(".config")
+                .join("kaku")
+                .join(script),
+        );
+        candidates.push(PathBuf::from(format!(
+            "/Applications/Kaku.app/Contents/Resources/{}",
+            script
+        )));
         candidates.push(
             config::HOME_DIR
                 .join("Applications")
                 .join("Kaku.app")
                 .join("Contents")
                 .join("Resources")
-                .join("setup_zsh.sh"),
+                .join(script),
         );
 
         candidates.into_iter().find(|p| p.exists())

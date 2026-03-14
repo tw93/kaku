@@ -24,19 +24,57 @@ CURRENT_CONFIG_VERSION="$(read_bundled_config_version "$SCRIPT_DIR")"
 # when optional setup steps fail on user machines.
 trap persist_config_version EXIT
 
-# Resources directory resolution
-if [[ -f "$SCRIPT_DIR/setup_zsh.sh" ]]; then
-	RESOURCES_DIR="$SCRIPT_DIR"
-elif [[ -f "/Applications/Kaku.app/Contents/Resources/setup_zsh.sh" ]]; then
-	RESOURCES_DIR="/Applications/Kaku.app/Contents/Resources"
-elif [[ -f "$HOME/Applications/Kaku.app/Contents/Resources/setup_zsh.sh" ]]; then
-	RESOURCES_DIR="$HOME/Applications/Kaku.app/Contents/Resources"
-else
-	# Fallback for dev environment
-	RESOURCES_DIR="$SCRIPT_DIR"
-fi
+# Resource resolution helpers
+detect_kaku_target_shell() {
+	if [[ -n "${KAKU_TARGET_SHELL:-}" ]]; then
+		printf '%s\n' "$KAKU_TARGET_SHELL"
+		return
+	fi
 
-SETUP_SCRIPT="$RESOURCES_DIR/setup_zsh.sh"
+	if [[ -n "${SHELL:-}" ]]; then
+		printf '%s\n' "$SHELL"
+		return
+	fi
+
+	printf '%s\n' "/bin/zsh"
+}
+
+detect_kaku_setup_script() {
+	local shell_path
+	shell_path="$(detect_kaku_target_shell)"
+	case "$shell_path" in
+		*fish|fish)
+			printf 'setup_fish.sh'
+			;;
+		*)
+			printf 'setup_zsh.sh'
+			;;
+	esac
+}
+
+resolve_resources_dir() {
+	if [[ -d "$SCRIPT_DIR" ]]; then
+		if [[ -f "$SCRIPT_DIR/setup_fish.sh" || -f "$SCRIPT_DIR/setup_zsh.sh" ]]; then
+			printf '%s\n' "$SCRIPT_DIR"
+			return
+		fi
+	fi
+
+	if [[ -f "/Applications/Kaku.app/Contents/Resources/setup_fish.sh" || -f "/Applications/Kaku.app/Contents/Resources/setup_zsh.sh" ]]; then
+		printf '%s\n' "/Applications/Kaku.app/Contents/Resources"
+		return
+	fi
+
+	if [[ -f "$HOME/Applications/Kaku.app/Contents/Resources/setup_fish.sh" || -f "$HOME/Applications/Kaku.app/Contents/Resources/setup_zsh.sh" ]]; then
+		printf '%s\n' "$HOME/Applications/Kaku.app/Contents/Resources"
+		return
+	fi
+
+	printf '%s\n' "$SCRIPT_DIR"
+}
+
+RESOURCES_DIR="$(resolve_resources_dir)"
+SETUP_SCRIPT="$RESOURCES_DIR/$(detect_kaku_setup_script)"
 TOOLS_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
 
 resolve_kaku_cli() {
@@ -79,17 +117,27 @@ echo "A fast, out-of-the-box terminal built for AI coding."
 echo "--------------------------------------------------------"
 echo "Would you like to install Kaku's enhanced shell features?"
 echo "This includes:"
-echo "  - z - Smart Directory Jumper"
-echo "  - zsh-completions - Rich Tab Completions"
-echo "  - Zsh Syntax Highlighting"
-echo "  - Zsh Autosuggestions"
+if [[ "$(detect_kaku_setup_script)" == "setup_fish.sh" ]]; then
+	echo "  - Smart Directory Jump"
+	echo "  - Fish-friendly completion and autosuggestions defaults"
+else
+	echo "  - z - Smart Directory Jumper"
+	echo "  - zsh-completions - Rich Tab Completions"
+	echo "  - Zsh Syntax Highlighting"
+	echo "  - Zsh Autosuggestions"
+fi
 echo "  - Kaku Theme"
 echo "  - Optional CLI tools via Homebrew: Starship, Delta, Lazygit, Yazi"
 echo "  - If Homebrew is missing, Kaku can offer to install it"
 echo ""
 echo "Shell config model:"
-echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
-echo "  - .zshrc gets one PATH line plus one source line for the managed Kaku shell config"
+if [[ "$(detect_kaku_setup_script)" == "setup_fish.sh" ]]; then
+	echo "  - Kaku writes managed shell config to ~/.config/kaku/fish/kaku.fish"
+	echo "  - config.fish gets PATH line plus one source line for the managed Kaku shell config"
+else
+	echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
+	echo "  - .zshrc gets one PATH line plus one source line for the managed Kaku shell config"
+fi
 echo "  - You can roll back anytime with: kaku reset"
 echo "--------------------------------------------------------"
 echo ""
@@ -119,14 +167,14 @@ if [[ "$INSTALL_SHELL" == "true" ]]; then
 		fi
 	elif [[ -f "$SETUP_SCRIPT" ]]; then
 		echo ""
-		echo "Warning: Kaku CLI not found during first-run setup. Falling back to setup_zsh.sh."
+		echo "Warning: Kaku CLI not found during first-run setup. Falling back to $(basename "$SETUP_SCRIPT")."
 		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT"; then
 			echo ""
 			echo "Warning: shell setup failed. You can retry manually:"
 			echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 bash \"$SETUP_SCRIPT\""
 		fi
 	else
-		echo "Error: neither kaku CLI nor setup_zsh.sh was found for shell setup."
+		echo "Error: neither kaku CLI nor $(basename "$SETUP_SCRIPT") was found for shell setup."
 	fi
 else
 	echo ""

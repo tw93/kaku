@@ -9,7 +9,16 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-USER_BIN_DIR="$HOME/.config/kaku/zsh/bin"
+case "${KAKU_TARGET_SHELL:-${SHELL:-/bin/zsh}}" in
+*fish|fish)
+	USER_BIN_DIR="$HOME/.config/kaku/fish/bin"
+	RELOAD_CMD="exec fish"
+	;;
+*)
+	USER_BIN_DIR="$HOME/.config/kaku/zsh/bin"
+	RELOAD_CMD="exec zsh"
+	;;
+esac
 MISSING_TOOLS=()
 LEGACY_MIGRATED=0
 BREW_BIN=""
@@ -269,5 +278,5 @@ migrate_legacy_binary_if_shadowed "delta"
 
 if [[ "$LEGACY_MIGRATED" == "1" ]]; then
 	echo ""
-	echo -e "${YELLOW}One-time action:${NC} run ${BOLD}exec zsh${NC} to reload prompt hooks after migration."
+	echo -e "${YELLOW}One-time action:${NC} run ${BOLD}${RELOAD_CMD}${NC} to reload prompt hooks after migration."
 fi

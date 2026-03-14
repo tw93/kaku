@@ -1543,6 +1543,7 @@ local function resolve_yazi_command()
   local candidates = { "yazi", "/opt/homebrew/bin/yazi", "/usr/local/bin/yazi" }
   if home ~= "" then
     table.insert(candidates, 1, home .. "/.config/kaku/zsh/bin/yazi")
+    table.insert(candidates, 1, home .. "/.config/kaku/fish/bin/yazi")
   end
   local resolved = nil
   for _, cmd in ipairs(candidates) do

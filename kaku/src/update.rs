@@ -751,13 +751,23 @@ rollback() {
 }
 
 install_kaku_wrapper_fallback() {
-  local home_dir wrapper_path wrapper_dir
+  local home_dir shell_candidate wrapper_shell wrapper_path wrapper_dir
   home_dir="${HOME:-}"
   if [[ -z "$home_dir" ]]; then
     return 1
   fi
 
-  wrapper_path="$home_dir/.config/kaku/zsh/bin/kaku"
+  shell_candidate="${KAKU_TARGET_SHELL:-${SHELL:-/bin/zsh}}"
+  case "$shell_candidate" in
+    *fish|fish)
+      wrapper_shell="fish"
+      ;;
+    *)
+      wrapper_shell="zsh"
+      ;;
+  esac
+
+  wrapper_path="$home_dir/.config/kaku/$wrapper_shell/bin/kaku"
   wrapper_dir="${wrapper_path%/*}"
   /bin/mkdir -p "$wrapper_dir"
 
@@ -778,11 +788,12 @@ for candidate in \
   fi
 done
 
-echo "kaku: Kaku.app not found. Expected /Applications/Kaku.app." >&2
-exit 127
+  echo "kaku: Kaku.app not found. Expected /Applications/Kaku.app." >&2
+  exit 127
 EOF
 
   /bin/chmod 755 "$wrapper_path"
+  printf '%s\n' "$wrapper_path"
 }
 
 log "start apply update"
@@ -845,8 +856,8 @@ if "$TARGET_CLI" init --update-only >>"$LOG_FILE" 2>&1; then
   log "shell integration refreshed"
 else
   log "warning: failed to refresh shell integration via kaku init"
-  if install_kaku_wrapper_fallback >>"$LOG_FILE" 2>&1; then
-    log "installed fallback kaku wrapper at ~/.config/kaku/zsh/bin/kaku"
+  if fallback_wrapper_path="$(install_kaku_wrapper_fallback)"; then
+    log "installed fallback kaku wrapper at ${fallback_wrapper_path:-~/.config/kaku/<unknown>/bin/kaku}"
   else
     log "warning: failed to install fallback kaku wrapper"
   fi
