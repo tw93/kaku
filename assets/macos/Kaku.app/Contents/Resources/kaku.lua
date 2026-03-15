@@ -2416,6 +2416,16 @@ local KAKU_BLUE = '#5fa8ff'
 local KAKU_BRIGHT_BLUE = '#8cc2ff'
 local KAKU_RED = '#ff6767'
 
+-- Track bell events per pane for tab notification indicator.
+-- Unlike has_unseen_output (which fires on any output, making the indicator
+-- permanently lit for TUI apps like Claude Code), bell events only fire when
+-- a program explicitly sends BEL (\a), making them suitable as completion signals.
+local _bell_panes = {}
+
+wezterm.on('bell', function(window, pane)
+  _bell_panes[tostring(pane:pane_id())] = true
+end)
+
 wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, max_width)
   -- Evict stale cache only on the first tab to avoid O(n²) across the render cycle
   if tab.tab_index == 0 then
@@ -2467,6 +2477,24 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
   if not fg then
     fg = tab.is_active and KAKU_WHITE or (hover and KAKU_WHITE or KAKU_GRAY)
   end
+
+  -- Bell-based prefix indicator: show ● only when a BEL was received,
+  -- clear when the tab becomes active (user has seen the notification).
+  local pane_key = active_pane and tostring(active_pane.pane_id) or nil
+  if pane_key and _bell_panes[pane_key] then
+    if tab.is_active then
+      _bell_panes[pane_key] = nil
+    else
+      return {
+        { Attribute = { Intensity = intensity } },
+        { Foreground = { Color = KAKU_ORANGE } },
+        { Text = ' ● ' },
+        { Foreground = { Color = fg } },
+        { Text = text .. ' ' },
+      }
+    end
+  end
+
   return {
     { Attribute = { Intensity = intensity } },
     { Foreground = { Color = fg } },
